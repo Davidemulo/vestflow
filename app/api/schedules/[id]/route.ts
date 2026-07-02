@@ -5,7 +5,6 @@ import {
   NETWORK,
   vestingProgress,
 } from "@/lib/stellar";
-import { getClaimable, getSchedule, NETWORK, vestingProgress } from "@/lib/stellar";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { NextRequest, NextResponse } from "next/server";
 
