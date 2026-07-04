@@ -203,9 +203,11 @@ export interface Client {
    * Panics with `"Amount must be positive"` if `total_amount` ≤ 0.
    * Panics with `"Duration must be positive"` if `duration` = 0.
    * Panics with `"Cliff cannot exceed duration"` if `cliff_duration` > `duration`.
+   * Panics with `"Lockup cannot be less than cliff"` if `lockup_duration` < `cliff_duration`.
+   * Panics with `"Start time cannot be in the past"` if `start_time` is older than the current ledger timestamp.
    * Panics with `"Beneficiary must differ from grantor"` if `beneficiary == grantor`.
    */
-  create_schedule: ({grantor, beneficiary, token, total_amount, start_time, duration, cliff_duration, kind, revocable}: {grantor: string, beneficiary: string, token: string, total_amount: i128, start_time: u64, duration: u64, cliff_duration: u64, kind: VestingKind, revocable: boolean}, options?: MethodOptions) => Promise<AssembledTransaction<u64>>
+  create_schedule: ({grantor, beneficiary, token, total_amount, start_time, duration, cliff_duration, lockup_duration, kind, revocable}: {grantor: string, beneficiary: string, token: string, total_amount: i128, start_time: u64, duration: u64, cliff_duration: u64, lockup_duration: u64, kind: VestingKind, revocable: boolean}, options?: MethodOptions) => Promise<AssembledTransaction<u64>>
 
   /**
    * Construct and simulate a execute_upgrade transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.

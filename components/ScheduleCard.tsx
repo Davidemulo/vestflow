@@ -8,17 +8,14 @@ import {
   vestingProgress,
   formatDate,
   formatCliffDate,
-  claimVested,
-  revokeSchedule,
-  parseContractError,
-  NETWORK,
   NATIVE_TOKEN,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
-import { useToast } from "@/components/Toast";
 import CopyButton from "@/components/CopyButton";
 import ClaimModal from "@/components/ClaimModal";
+import RevokeModal from "@/components/RevokeModal";
 import VestingChart from "@/components/VestingChart";
+import AddressLabel from "@/components/AddressLabel";
 import { useXlmPrice, formatUsd } from "@/lib/price";
 
 export default function ScheduleCard({
@@ -29,100 +26,30 @@ export default function ScheduleCard({
   onAction: () => void;
 }) {
   const { publicKey } = useWallet();
-  const { addToast, updateToast } = useToast();
-  const [loading, setLoading] = useState<"claim" | "revoke" | null>(null);
   const [showChart, setShowChart] = useState(false);
   const [showClaimModal, setShowClaimModal] = useState(false);
+  const [showRevokeModal, setShowRevokeModal] = useState(false);
   const xlmPrice = useXlmPrice();
 
   const now = Math.floor(Date.now() / 1000);
   const progress = vestingProgress(schedule, now);
+  const lockupEndsAt = schedule.start_time + schedule.lockup_duration;
+  const isInLockup = schedule.lockup_duration > 0 && now < lockupEndsAt;
 
   // Claimed percentage relative to total (for the dual progress bar)
   const claimedPct =
     schedule.total_amount > 0n
-      ? Math.min(
-          100,
-          Math.round(
-            (Number(schedule.claimed) / Number(schedule.total_amount)) * 100
-          )
-        )
+      ? Math.min(100, Number((schedule.claimed * 100n) / schedule.total_amount))
       : 0;
 
   const isBeneficiary = publicKey === schedule.beneficiary;
   const isGrantor = publicKey === schedule.grantor;
-  const vested = BigInt(
-    Math.floor((Number(schedule.total_amount) * progress) / 100)
-  );
-  const claimableAmt = vested > schedule.claimed ? vested - schedule.claimed : 0n;
+  const vested = (schedule.total_amount * BigInt(progress)) / 100n;
+  const claimableAmt = !isInLockup && vested > schedule.claimed ? vested - schedule.claimed : 0n;
 
   // SEP-41 token symbol support
   const isNative = schedule.token === NATIVE_TOKEN;
   const tokenSymbol = isNative ? "XLM" : `Token (${truncate(schedule.token, 4, 4)})`;
-
-  // ── Claim ──────────────────────────────────────────────────────────────────
-  const handleClaim = async () => {
-    if (!publicKey) return;
-    setLoading("claim");
-
-    const toastId = addToast({
-      status: "pending",
-      title: "Claim pending…",
-      message: "Waiting for transaction to confirm.",
-    });
-
-    try {
-      const hash = await claimVested(publicKey, schedule.id);
-      updateToast(toastId, {
-        status: "success",
-        title: "Tokens claimed!",
-        message: `${stroopsToXlm(claimableAmt)} ${tokenSymbol} transferred to your wallet.`,
-        txHash: hash,
-        network: NETWORK,
-      });
-      onAction();
-    } catch (e: any) {
-      updateToast(toastId, {
-        status: "error",
-        title: "Claim failed",
-        message: parseContractError(e),
-      });
-    } finally {
-      setLoading(null);
-    }
-  };
-
-  // ── Revoke ─────────────────────────────────────────────────────────────────
-  const handleRevoke = async () => {
-    if (!publicKey) return;
-    setLoading("revoke");
-
-    const toastId = addToast({
-      status: "pending",
-      title: "Revoke pending…",
-      message: "Waiting for transaction to confirm.",
-    });
-
-    try {
-      const hash = await revokeSchedule(publicKey, schedule.id);
-      updateToast(toastId, {
-        status: "success",
-        title: "Schedule revoked",
-        message: "Unvested tokens have been returned.",
-        txHash: hash,
-        network: NETWORK,
-      });
-      onAction();
-    } catch (e: any) {
-      updateToast(toastId, {
-        status: "error",
-        title: "Revoke failed",
-        message: parseContractError(e),
-      });
-    } finally {
-      setLoading(null);
-    }
-  };
 
   const statusColor = schedule.revoked
     ? "bg-red-500/10 text-red-400"
@@ -156,8 +83,24 @@ export default function ScheduleCard({
 
       {/* Details grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-zinc-400">
-        <div><span className="text-zinc-600">Grantor</span><p className="font-mono text-zinc-300 mt-0.5"><span className="sm:hidden">{truncate(schedule.grantor, 4, 3)}</span><span className="hidden sm:inline">{truncate(schedule.grantor)}</span></p></div>
-        <div><span className="text-zinc-600">Beneficiary</span><p className="font-mono text-zinc-300 mt-0.5"><span className="sm:hidden">{truncate(schedule.beneficiary, 4, 3)}</span><span className="hidden sm:inline">{truncate(schedule.beneficiary)}</span></p></div>
+        <div>
+          <span className="text-zinc-600">Grantor</span>
+          <AddressLabel
+            address={schedule.grantor}
+            compact
+            className="mt-0.5"
+            secondaryClassName="text-[11px] font-mono text-zinc-500 break-all"
+          />
+        </div>
+        <div>
+          <span className="text-zinc-600">Beneficiary</span>
+          <AddressLabel
+            address={schedule.beneficiary}
+            compact
+            className="mt-0.5"
+            secondaryClassName="text-[11px] font-mono text-zinc-500 break-all"
+          />
+        </div>
         <div>
           <span className="text-zinc-600">Total</span>
           <p className="text-zinc-300 mt-0.5">{stroopsToXlm(schedule.total_amount)} XLM</p>
@@ -182,63 +125,101 @@ export default function ScheduleCard({
         )}
       </div>
 
-      {/* ── Dual progress bar (#86) ─────────────────────────────────────────── */}
+      {/* ── Progress / Milestones ────────────────────────────────────────── */}
       <div>
-        {/* Legend row */}
-        <div className="flex justify-between items-center text-xs text-zinc-500 mb-1.5">
-          <div className="flex items-center gap-3">
-            <span className="flex items-center gap-1">
-              <span
-                className="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500"
-                aria-hidden="true"
-              />
-              Vested {progress}%
-            </span>
-            <span className="flex items-center gap-1">
-              <span
-                className="inline-block w-2 h-2 rounded-full bg-emerald-500"
-                aria-hidden="true"
-              />
-              Claimed {claimedPct}%
-            </span>
+        {schedule.kind === "Graded" && schedule.milestones && schedule.milestones.length > 0 ? (
+          /* Graded milestone checklist (#280) */
+          <div className="flex flex-col gap-1.5">
+            <p className="text-xs text-zinc-600 uppercase tracking-wider mb-0.5">Milestones</p>
+            {schedule.milestones.map((m, i) => {
+              const done = now >= m.timestamp;
+              const label = new Date(m.timestamp * 1000).toLocaleDateString(undefined, {
+                month: "short",
+                year: "numeric",
+              });
+              return (
+                <div key={i} className="flex items-center gap-2 text-xs">
+                  <span className={done ? "text-emerald-400" : "text-zinc-600"} aria-hidden="true">
+                    {done ? "✓" : "○"}
+                  </span>
+                  <span className={done ? "text-zinc-300" : "text-zinc-500"}>
+                    {m.pct}% — {label}
+                  </span>
+                </div>
+              );
+            })}
           </div>
-          <span className="text-zinc-600">
-            {stroopsToXlm(schedule.total_amount)} {tokenSymbol}
-          </span>
-        </div>
+        ) : (
+          <>
+            {/* Legend row */}
+            <div className="flex justify-between items-center text-xs text-zinc-500 mb-1.5">
+              <div className="flex items-center gap-3">
+                <span className="flex items-center gap-1">
+                  <span
+                    className="inline-block w-2 h-2 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500"
+                    aria-hidden="true"
+                  />
+                  Vested {progress}%
+                </span>
+                <span className="flex items-center gap-1">
+                  <span
+                    className="inline-block w-2 h-2 rounded-full bg-emerald-500"
+                    aria-hidden="true"
+                  />
+                  Claimed {claimedPct}%
+                </span>
+              </div>
+              <span className="text-zinc-600">
+                {stroopsToXlm(schedule.total_amount)} {tokenSymbol}
+              </span>
+            </div>
 
-        {/* Track */}
-        <div
-          className="relative h-2.5 rounded-full bg-white/5 overflow-hidden"
-          role="progressbar"
-          aria-label={`Vesting progress: ${progress}% vested, ${claimedPct}% claimed`}
-          aria-valuenow={progress}
-          aria-valuemin={0}
-          aria-valuemax={100}
-        >
-          {/* Vested layer (gradient) */}
-          <div
-            className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all duration-700"
-            style={{ width: `${progress}%` }}
-          />
-          {/* Claimed layer (solid emerald, sits on top) */}
-          {claimedPct > 0 && (
+            {/* Track */}
             <div
-              className="absolute inset-y-0 left-0 rounded-full bg-emerald-500/80 transition-all duration-700"
-              style={{ width: `${claimedPct}%` }}
-            />
-          )}
-        </div>
+              className="relative h-2.5 rounded-full bg-white/5 overflow-hidden"
+              role="progressbar"
+              aria-label={`Vesting progress: ${progress}% vested, ${claimedPct}% claimed`}
+              aria-valuenow={progress}
+              aria-valuemin={0}
+              aria-valuemax={100}
+            >
+              {/* Vested layer (gradient) */}
+              <div
+                className="absolute inset-y-0 left-0 rounded-full bg-gradient-to-r from-violet-500 to-cyan-500 transition-all duration-700"
+                style={{ width: `${progress}%` }}
+              />
+              {/* Claimed layer (solid emerald, sits on top) */}
+              {claimedPct > 0 && (
+                <div
+                  className="absolute inset-y-0 left-0 rounded-full bg-emerald-500/80 transition-all duration-700"
+                  style={{ width: `${claimedPct}%` }}
+                />
+              )}
+            </div>
 
-        {/* Cliff label */}
-        {schedule.kind === "Cliff" &&
-          schedule.cliff_duration > 0 &&
-          now < schedule.start_time + schedule.cliff_duration &&
+            {/* Cliff label */}
+            {schedule.kind === "Cliff" &&
+              schedule.cliff_duration > 0 &&
+              now < schedule.start_time + schedule.cliff_duration &&
+              !schedule.revoked && (
+                <p className="text-xs text-zinc-500 mt-1.5">
+                  Unlocks on{" "}
+                  <span className="text-zinc-300">
+                    {formatCliffDate(schedule.cliff_duration, schedule.start_time)}
+                  </span>
+                </p>
+              )}
+          </>
+        )}
+
+        {/* Lockup expiry (#279) */}
+        {schedule.lockup_duration > 0 &&
+          now < schedule.start_time + schedule.lockup_duration &&
           !schedule.revoked && (
             <p className="text-xs text-zinc-500 mt-1.5">
-              Unlocks on{" "}
+              Locked until:{" "}
               <span className="text-zinc-300">
-                {formatCliffDate(schedule.cliff_duration, schedule.start_time)}
+                {formatDate(schedule.start_time + schedule.lockup_duration)}
               </span>
             </p>
           )}
@@ -261,19 +242,19 @@ export default function ScheduleCard({
 
       {/* Actions */}
       {publicKey && !schedule.revoked && (
-        <div className="flex gap-2 mt-1">
+        <div className="flex flex-col sm:flex-row gap-2 mt-1">
           {isBeneficiary && claimableAmt > 0n && (
-            <button onClick={() => setShowClaimModal(true)} className="btn-primary text-xs rounded-lg px-3 py-1.5 font-semibold text-white">
-              Claim {stroopsToXlm(claimableAmt)} XLM{xlmPrice !== null ? ` (${formatUsd(claimableAmt, xlmPrice)})` : ""}
+            <button onClick={() => setShowClaimModal(true)} className="btn-primary text-xs rounded-lg px-3 py-1.5 font-semibold text-white flex-1 sm:flex-auto truncate">
+              <span className="sm:hidden">Claim {stroopsToXlm(claimableAmt)} XLM</span>
+              <span className="hidden sm:inline">Claim {stroopsToXlm(claimableAmt)} XLM{xlmPrice !== null ? ` (${formatUsd(claimableAmt, xlmPrice)})` : ""}</span>
             </button>
           )}
           {isGrantor && schedule.revocable && progress < 100 && (
             <button
-              onClick={handleRevoke}
-              disabled={!!loading}
-              className="text-xs rounded-lg px-3 py-1.5 border border-red-500/30 text-red-400 hover:border-red-500/60 transition-colors disabled:opacity-60"
+              onClick={() => setShowRevokeModal(true)}
+              className="text-xs rounded-lg px-3 py-1.5 border border-red-500/30 text-red-400 hover:border-red-500/60 transition-colors"
             >
-              {loading === "revoke" ? "Processing…" : "Revoke"}
+              Revoke
             </button>
           )}
         </div>
@@ -286,6 +267,14 @@ export default function ScheduleCard({
         open={showClaimModal}
         onClose={() => setShowClaimModal(false)}
         onSuccess={() => { setShowClaimModal(false); onAction(); }}
+      />
+      <RevokeModal
+        schedule={schedule}
+        vestedAmt={vested}
+        tokenSymbol={tokenSymbol}
+        open={showRevokeModal}
+        onClose={() => setShowRevokeModal(false)}
+        onSuccess={() => { setShowRevokeModal(false); onAction(); }}
       />
     </div>
   );

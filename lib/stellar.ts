@@ -43,6 +43,42 @@ export async function connectWallet(): Promise<string> {
   return result.address;
 }
 
+/**
+ * Stellar minimum reserve in stroops.
+ * A new account with 0 subentries needs 2 × 0.5 XLM = 1 XLM (10_000_000 stroops).
+ * This constant is a safe conservative floor; accounts with more subentries have
+ * a higher reserve, but most Freighter wallets hold the same minimal trustline set.
+ */
+const XLM_MIN_RESERVE_STROOPS = 10_000_000n; // 1 XLM
+
+/**
+ * Fetch the spendable XLM balance for a Stellar public key.
+ *
+ * Returns the native balance minus the Stellar minimum reserve so callers
+ * can compare it against a requested amount without risking a reserve error.
+ * Returns 0n if the account has no native balance or does not exist.
+ *
+ * @param publicKey - Stellar G-address to query.
+ */
+export async function getWalletXlmBalance(publicKey: string): Promise<bigint> {
+  try {
+    const account = await server.getAccount(publicKey);
+    const nativeBalance = ((account as any).balances as any[]).find(
+      (b: any) => b.asset_type === "native"
+    );
+    if (!nativeBalance) return 0n;
+    // Stellar balances are returned as decimal strings (e.g. "1234.5678901")
+    // with 7 decimal places of precision. Convert to stroops.
+    const stroops = xlmToStroops(nativeBalance.balance);
+    const spendable = stroops > XLM_MIN_RESERVE_STROOPS
+      ? stroops - XLM_MIN_RESERVE_STROOPS
+      : 0n;
+    return spendable;
+  } catch {
+    return 0n;
+  }
+}
+
 // ---------- Read ----------
 
 async function simulate(method: string, args: xdr.ScVal[], publicKey?: string): Promise<xdr.ScVal> {
@@ -102,6 +138,62 @@ export async function getClaimable(id: number, publicKey?: string): Promise<bigi
 }
 
 /**
+ * Preview how many tokens will be claimable at an arbitrary future timestamp.
+ *
+ * Calls the `claimable_at_timestamp` contract view, which projects the
+ * current schedule state forward to `ts`. Accurate for future timestamps;
+ * for past timestamps the result may differ from what was historically
+ * claimable because it uses the current claimed_amount.
+ *
+ * Returns 0n for unknown schedule IDs.
+ */
+export async function getClaimableAtTimestamp(
+  id: number,
+  ts: number,
+  publicKey?: string
+): Promise<bigint> {
+  try {
+    const val = await simulate(
+      "claimable_at_timestamp",
+      [nativeToScVal(id, { type: "u64" }), nativeToScVal(ts, { type: "u64" })],
+      publicKey
+    );
+    return BigInt(scValToNative(val));
+  } catch {
+    return 0n;
+  }
+}
+
+/**
+ * Fetch multiple schedules in a single simulation round-trip by calling
+ * the `get_schedule_batch` contract view.
+ *
+ * Returns results in the same order as `ids`. Unknown IDs return null.
+ * Replaces the Promise.all(getSchedule) N-call pattern, reducing N RPC
+ * calls to 1.
+ */
+export async function getScheduleBatch(
+  ids: number[],
+  publicKey?: string
+): Promise<(ScheduleData | null)[]> {
+  if (ids.length === 0) return [];
+  try {
+    const idsVal = xdr.ScVal.scvVec(
+      ids.map((id) => nativeToScVal(id, { type: "u64" }))
+    );
+    const val = await simulate("get_schedule_batch", [idsVal], publicKey);
+    // scValToNative decodes Option<VestingSchedule> as a raw JS object or
+    // null/undefined. We must run parseSchedule on each non-null item so
+    // Soroban field names (claimed_amount, duration_seconds) are mapped to
+    // the ScheduleData interface fields (claimed, duration).
+    const rawItems = scValToNative(val) as any[];
+    return rawItems.map((raw: any) => (raw == null ? null : parseSchedule(raw)));
+  } catch {
+    return ids.map(() => null);
+  }
+}
+
+/**
  * Fetch claimable amounts for every schedule ID in a single simulation
  * round-trip by calling the `claimable_bulk` contract view function.
  *
@@ -125,17 +217,38 @@ export async function getClaimableBulk(
   }
 }
 
+/**
+ * Fetch total vested amounts (earned, including already-claimed) for multiple
+ * schedule IDs in a single simulation round-trip using the vested_amount_bulk
+ * contract view.
+ *
+ * Returns amounts in the same order as `ids`. Unknown IDs return 0n.
+ */
+export async function getVestedAmountBulk(
+  ids: number[],
+  publicKey?: string
+): Promise<bigint[]> {
+  if (ids.length === 0) return [];
+  try {
+    const idsVal = xdr.ScVal.scvVec(
+      ids.map((id) => nativeToScVal(id, { type: "u64" }))
+    );
+    const val = await simulate("vested_amount_bulk", [idsVal], publicKey);
+    const native = scValToNative(val) as bigint[];
+    return native.map((v) => BigInt(v));
+  } catch {
+    // Fallback: return zeros so callers always get a valid array
+    return ids.map(() => 0n);
+  }
+}
+
+
 export async function getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
   const count = await getScheduleCount();
   if (count === 0) return [];
-
-  // Fetch all schedule structs in parallel (N calls)
   const ids = Array.from({ length: count }, (_, i) => i + 1);
-  const [schedules, _claimableAmounts] = await Promise.all([
-    Promise.all(ids.map((id) => getSchedule(id, publicKey))),
-    getClaimableBulk(ids, publicKey), // single simulation round-trip
-  ]);
-
+  // Single batch call replaces the former Promise.all(getSchedule) N-call pattern.
+  const schedules = await getScheduleBatch(ids, publicKey);
   return schedules.filter(Boolean) as ScheduleData[];
 }
 
@@ -191,12 +304,13 @@ export async function createSchedule(
   durationDays: number,
   cliffDays: number,
   kind: "Linear" | "Cliff" | "LinearWithCliff",
-  revocable: boolean
+  revocable: boolean,
+  lockupDays: number = cliffDays
 ): Promise<string> {
   const totalStroops = xlmToStroops(totalAmountXlm);
   const durationSecs = durationDays * 86400;
   const cliffSecs = cliffDays * 86400;
-  const lockupSecs = cliffSecs;
+  const lockupSecs = lockupDays * 86400;
 
   const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(kind)]);
 
@@ -223,6 +337,17 @@ export async function revokeSchedule(publicKey: string, scheduleId: number): Pro
   return buildAndSend(publicKey, "revoke", [nativeToScVal(scheduleId, { type: "u64" })]);
 }
 
+export async function transferGrantor(
+  publicKey: string,
+  scheduleId: number,
+  newGrantor: string
+): Promise<string> {
+  return buildAndSend(publicKey, "transfer_grantor", [
+    nativeToScVal(scheduleId, { type: "u64" }),
+    nativeToScVal(newGrantor, { type: "address" }),
+  ]);
+}
+
 // ---------- Types ----------
 
 export interface ScheduleData {
@@ -235,9 +360,14 @@ export interface ScheduleData {
   start_time: number;
   duration: number;
   cliff_duration: number;
-  kind: "Linear" | "Cliff" | "LinearWithCliff";
+  lockup_duration: number;
+  kind: "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
   revocable: boolean;
   revoked: boolean;
+  paused: boolean;
+  requires_milestones: boolean;
+  vested_at_revoke: bigint;
+  milestones?: { pct: number; timestamp: number }[];
 }
 
 function parseSchedule(raw: any): ScheduleData {
@@ -247,20 +377,40 @@ function parseSchedule(raw: any): ScheduleData {
     beneficiary: raw.beneficiary?.toString() ?? "",
     token: raw.token?.toString() ?? "",
     total_amount: BigInt(raw.total_amount ?? 0),
-    claimed: BigInt(raw.claimed ?? 0),
+    claimed: BigInt(raw.claimed ?? raw.claimed_amount ?? 0),
     start_time: Number(raw.start_time ?? 0),
-    duration: Number(raw.duration ?? 0),
-    cliff_duration: Number(raw.cliff_duration ?? 0),
-    kind: raw.kind === "Cliff" ? "Cliff" : raw.kind === "LinearWithCliff" ? "LinearWithCliff" : "Linear",
+    duration: Number(raw.duration ?? raw.duration_seconds ?? 0),
+    cliff_duration: Number(raw.cliff_duration ?? raw.cliff_seconds ?? 0),
+    lockup_duration: Number(raw.lockup_duration ?? raw.lockup_seconds ?? 0),
+    kind:
+      raw.kind === "Cliff"
+        ? "Cliff"
+        : raw.kind === "LinearWithCliff"
+        ? "LinearWithCliff"
+        : raw.kind === "Graded"
+        ? "Graded"
+        : "Linear",
     revocable: Boolean(raw.revocable),
     revoked: Boolean(raw.revoked),
+    paused: Boolean(raw.paused),
+    requires_milestones: Boolean(raw.requires_milestones),
+    vested_at_revoke: BigInt(raw.vested_at_revoke ?? raw.vested_at_revocation ?? 0),
+    milestones: Array.isArray(raw.milestones)
+      ? (raw.milestones as any[]).map((m) => ({
+          pct: Number(m.pct ?? m.percent ?? 0),
+          timestamp: Number(m.timestamp ?? m.ts ?? 0),
+        }))
+      : undefined,
   };
 }
 
 // ---------- Helpers ----------
 
 export function stroopsToXlm(s: bigint): string {
-  return (Number(s) / 10_000_000).toLocaleString(undefined, { maximumFractionDigits: 4 });
+  const whole = s / 10_000_000n;
+  const frac = s % 10_000_000n;
+  const fractional = frac.toString().padStart(7, "0").replace(/0+$/, "") || "0";
+  return `${whole}.${fractional}`;
 }
 
 export function truncate(addr: string, prefixLen = 6, suffixLen = 4): string {
@@ -269,6 +419,25 @@ export function truncate(addr: string, prefixLen = 6, suffixLen = 4): string {
 }
 
 export function vestingProgress(s: ScheduleData, now: number): number {
+  // Revoked schedules freeze at the progress captured when revocation
+  // happened. The contract stores this as `vested_at_revoke`; using the
+  // time-based formula below would keep animating past the revocation point,
+  // which is misleading next to the "Revoked" badge.
+  if (s.revoked) {
+    if (s.total_amount <= 0n) return 0;
+    return Math.min(
+      100,
+      Math.round((Number(s.vested_at_revoke) / Number(s.total_amount)) * 100)
+    );
+  }
+  if (s.kind === "Graded" && s.milestones && s.milestones.length > 0) {
+    return Math.min(
+      100,
+      s.milestones
+        .filter((m) => now >= m.timestamp)
+        .reduce((sum, m) => sum + m.pct, 0)
+    );
+  }
   if (now < s.start_time) return 0;
   const elapsed = now - s.start_time;
   return Math.min(100, Math.round((elapsed / s.duration) * 100));
@@ -293,15 +462,18 @@ export function formatCliffDate(cliffDuration: number, startTime: number): strin
 export function parseContractError(e: Error): string {
   const msg = e.message;
   // Map Soroban VestFlowError variants (Error(Contract, #X))
-  if (msg.includes("Contract error: 1") || msg.includes("Contract, #1") || msg.includes("Not authorized")) return "Not authorized to perform this action.";
+  if (msg.includes("Contract error: 1") || msg.includes("Contract, #1")) return "Schedule not found.";
   if (msg.includes("Contract error: 2") || msg.includes("Contract, #2") || msg.includes("Schedule is not revocable")) return "This schedule cannot be revoked.";
   if (msg.includes("Contract error: 3") || msg.includes("Contract, #3") || msg.includes("Already revoked")) return "This schedule has already been revoked.";
   if (msg.includes("Contract error: 4") || msg.includes("Contract, #4") || msg.includes("Nothing to claim yet")) return "No tokens are available to claim yet.";
-  if (msg.includes("Contract error: 5") || msg.includes("Contract, #5") || msg.includes("Schedule not found")) return "Schedule not found.";
-  if (msg.includes("Contract error: 6") || msg.includes("Contract, #6") || msg.includes("Duration too short")) return "The vesting duration is too short.";
+  if (msg.includes("Contract error: 5") || msg.includes("Contract, #5") || msg.includes("AmountZero")) return "Amount must be greater than zero.";
+  if (msg.includes("Contract error: 6") || msg.includes("Contract, #6") || msg.includes("DurationZero")) return "Duration must be greater than zero.";
   if (msg.includes("Contract error: 7") || msg.includes("Contract, #7") || msg.includes("Cliff exceeds duration")) return "The cliff duration cannot exceed the total duration.";
   if (msg.includes("Contract error: 8") || msg.includes("Contract, #8") || msg.includes("Schedule has been revoked")) return "This schedule was revoked.";
 
+  if (msg.includes("Schedule not found")) return "Schedule not found.";
+  if (msg.includes("Not authorized")) return "Not authorized to perform this action.";
+  if (msg.includes("Duration too short")) return "Duration must be greater than zero.";
   if (msg.includes("Not the grantor")) return "Only the grantor can perform this action.";
   if (msg.includes("Not the beneficiary")) return "Only the beneficiary can claim tokens.";
   if (msg.includes("Insufficient balance")) return "Insufficient balance to complete this action.";

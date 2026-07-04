@@ -83,10 +83,10 @@ function parseSchedule(raw: any): ScheduleData {
     beneficiary: raw.beneficiary?.toString() ?? "",
     token: raw.token?.toString() ?? "",
     total_amount: BigInt(raw.total_amount ?? 0),
-    claimed: BigInt(raw.claimed ?? 0),
+    claimed: BigInt(raw.claimed ?? raw.claimed_amount ?? 0),
     start_time: Number(raw.start_time ?? 0),
-    duration: Number(raw.duration ?? 0),
-    cliff_duration: Number(raw.cliff_duration ?? 0),
+    duration: Number(raw.duration ?? raw.duration_seconds ?? 0),
+    cliff_duration: Number(raw.cliff_duration ?? raw.cliff_seconds ?? 0),
     kind:
       raw.kind === "Cliff"
         ? "Cliff"

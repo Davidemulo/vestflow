@@ -12,16 +12,16 @@ import {
 import {
   getAllSchedules,
   getClaimableBulk,
+  getVestedAmountBulk,
   ScheduleData,
-  stroopsToXlm,
   vestingProgress,
-  formatDate,
   NATIVE_TOKEN,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
-import { useCountUp } from "@/lib/useCountUp";
+import { useCountUp } from "@/hooks/useCountUp";
+import { useAddressBook } from "@/hooks/useAddressBook";
 import Link from "next/link";
-import { useXlmPrice, formatUsd } from "@/lib/price";
+
 import { buildCombinedExportCSV, downloadCSV } from "@/lib/csvExport";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
@@ -33,6 +33,7 @@ interface DashboardStats {
   totalGranted: bigint;
   totalReceiving: bigint;
   claimableNow: bigint;
+  totalVested: bigint;
   activeSchedules: number;
 }
 
@@ -78,7 +79,7 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
   const toXlm = (v: bigint) => Number(v) / 10_000_000;
 
   return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
       <AnimatedStatCard
         label="Total Granted"
         value={toXlm(stats.totalGranted)}
@@ -90,6 +91,13 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
         label="Total Receiving"
         value={toXlm(stats.totalReceiving)}
         unit="XLM as beneficiary"
+        decimals={4}
+        enabled={fired}
+      />
+      <AnimatedStatCard
+        label="Total Vested"
+        value={toXlm(stats.totalVested)}
+        unit="XLM earned"
         decimals={4}
         enabled={fired}
       />
@@ -114,6 +122,7 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
 
 export default function DashboardPage() {
   const { publicKey } = useWallet();
+  const { getLabel } = useAddressBook();
   const [schedules, setSchedules] = useState<ScheduleData[]>([]);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
@@ -125,7 +134,6 @@ export default function DashboardPage() {
   const [sortBy, setSortBy] = useState<SortKey>("newest");
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
-  const xlmPrice = useXlmPrice();
 
   const load = async () => {
     setLoading(true);
@@ -138,13 +146,20 @@ export default function DashboardPage() {
         // Compute aggregate stats
         const userIds = userSchedules.map(s => s.id);
         const claimableAmounts = await getClaimableBulk(userIds, publicKey);
+        const vestedAmounts = await getVestedAmountBulk(userIds, publicKey);
+        
         const claimableMap = new Map<number, bigint>();
-        userIds.forEach((id, i) => claimableMap.set(id, claimableAmounts[i] ?? 0n));
+        const vestedMap = new Map<number, bigint>();
+        userIds.forEach((id, i) => {
+          claimableMap.set(id, claimableAmounts[i] ?? 0n);
+          vestedMap.set(id, vestedAmounts[i] ?? 0n);
+        });
 
         const now = Math.floor(Date.now() / 1000);
         let totalGranted = 0n;
         let totalReceiving = 0n;
         let claimableNow = 0n;
+        let totalVested = 0n;
         let activeSchedules = 0;
 
         for (const s of userSchedules) {
@@ -154,13 +169,14 @@ export default function DashboardPage() {
           if (s.beneficiary === publicKey) {
             totalReceiving += s.total_amount;
             claimableNow += claimableMap.get(s.id) ?? 0n;
+            totalVested += vestedMap.get(s.id) ?? 0n;
           }
           if (!s.revoked && vestingProgress(s, now) < 100) {
             activeSchedules++;
           }
         }
 
-        setStats({ totalGranted, totalReceiving, claimableNow, activeSchedules });
+        setStats({ totalGranted, totalReceiving, claimableNow, totalVested, activeSchedules });
       } else {
         setSchedules(all.slice(0, 6));
         setStats(null);
@@ -171,7 +187,7 @@ export default function DashboardPage() {
   useEffect(() => { load(); }, [publicKey]);
 
   // Apply role filter on top of the wallet-filtered list
-  const filteredSchedules = useMemo(() => {
+  const roleFiltered = useMemo(() => {
     if (!publicKey || roleFilter === "all") return schedules;
     if (roleFilter === "grantor") return schedules.filter(s => s.grantor === publicKey);
     return schedules.filter(s => s.beneficiary === publicKey);
@@ -186,7 +202,7 @@ export default function DashboardPage() {
   // Apply additional filters
   const multiFiltered = useMemo(() => {
     const now = Math.floor(Date.now() / 1000);
-    let filtered = [...filteredSchedules];
+    let filtered = [...roleFiltered];
 
     // Status filter
     if (statusFilter !== "all") {
@@ -214,7 +230,7 @@ export default function DashboardPage() {
     }
 
     return filtered;
-  }, [filteredSchedules, statusFilter, tokenFilter, startDateFilter, endDateFilter]);
+  }, [roleFiltered, statusFilter, tokenFilter, startDateFilter, endDateFilter]);
 
   // Apply sort on top of the multi-filtered list
   const sortedSchedules = useMemo(() => {
@@ -246,9 +262,11 @@ export default function DashboardPage() {
     return sortedSchedules.filter(
       s =>
         s.grantor.toLowerCase().includes(q) ||
-        s.beneficiary.toLowerCase().includes(q)
+        s.beneficiary.toLowerCase().includes(q) ||
+        (getLabel(s.grantor) ?? "").toLowerCase().includes(q) ||
+        (getLabel(s.beneficiary) ?? "").toLowerCase().includes(q)
     );
-  }, [sortedSchedules, q]);
+  }, [sortedSchedules, q, getLabel]);
 
   // Reset to page 1 whenever the filtered set changes
   useEffect(() => { setPage(1); }, [searchFiltered.length, roleFilter, statusFilter, tokenFilter, startDateFilter, endDateFilter, sortBy]);
@@ -258,7 +276,7 @@ export default function DashboardPage() {
   const paginated = searchFiltered.slice(pageStart, pageStart + PAGE_SIZE);
 
   const handleExportCSV = () => {
-    const csv = buildCombinedExportCSV(filteredSchedules);
+    const csv = buildCombinedExportCSV(multiFiltered);
     const timestamp = new Date().toISOString().split('T')[0];
     downloadCSV(csv, `vestflow-schedules-${timestamp}.csv`);
   };
@@ -276,7 +294,7 @@ export default function DashboardPage() {
   return (
     <>
       <Navbar />
-      <main className="max-w-5xl mx-auto px-6 pt-28 pb-20">
+      <main className="max-w-5xl mx-auto px-4 sm:px-6 pt-24 sm:pt-28 pb-20">
         {/* Header row */}
         <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
           <div>
@@ -305,40 +323,8 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {/* Summary stats */}
-        {publicKey && stats && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Granted</p>
-              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalGranted)} XLM</p>
-              {xlmPrice !== null && (
-                <p className="text-xs text-zinc-500 mt-0.5">{formatUsd(stats.totalGranted, xlmPrice)}</p>
-              )}
-              <p className="text-xs text-zinc-500 mt-1">as grantor</p>
-            </div>
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Total Receiving</p>
-              <p className="text-xl font-bold text-white">{stroopsToXlm(stats.totalReceiving)} XLM</p>
-              {xlmPrice !== null && (
-                <p className="text-xs text-zinc-500 mt-0.5">{formatUsd(stats.totalReceiving, xlmPrice)}</p>
-              )}
-              <p className="text-xs text-zinc-500 mt-1">as beneficiary</p>
-            </div>
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Claimable Now</p>
-              <p className="text-xl font-bold text-emerald-400">{stroopsToXlm(stats.claimableNow)} XLM</p>
-              {xlmPrice !== null && (
-                <p className="text-xs text-zinc-500 mt-0.5">{formatUsd(stats.claimableNow, xlmPrice)}</p>
-              )}
-              <p className="text-xs text-zinc-500 mt-1">available</p>
-            </div>
-            <div className="card p-4">
-              <p className="text-xs text-zinc-500 uppercase tracking-wider mb-1">Active Schedules</p>
-              <p className="text-xl font-bold text-white">{stats.activeSchedules}</p>
-              <p className="text-xs text-zinc-500 mt-1">currently vesting</p>
-            </div>
-          </div>
-        )}
+        {/* Summary stats — animated count-up (#270) */}
+        {publicKey && stats && <AnimatedStats stats={stats} />}
 
         {/* Role filter tabs (only when wallet connected and there are schedules) */}
         {publicKey && schedules.length > 0 && (
@@ -472,9 +458,9 @@ export default function DashboardPage() {
             type="text"
             value={query}
             onChange={e => setQuery(e.target.value)}
-            placeholder="Search by address…"
+            placeholder="Search by address or label…"
             className="input pr-8"
-            aria-label="Search schedules by address"
+            aria-label="Search schedules by address or label"
           />
           {query && (
             <button

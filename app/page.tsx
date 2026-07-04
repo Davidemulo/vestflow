@@ -35,6 +35,12 @@ export default function LandingPage() {
               View Dashboard
             </Link>
           </div>
+          <p className="mt-4 text-sm text-zinc-500">
+            New to VestFlow?{" "}
+            <Link href="/onboarding" className="text-zinc-400 hover:text-violet-400 transition-colors">
+              Start here →
+            </Link>
+          </p>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">

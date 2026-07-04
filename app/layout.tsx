@@ -6,11 +6,16 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "VestFlow — Token Vesting on Stellar",
   description: "Create and manage token vesting schedules on the Stellar network using Soroban smart contracts.",
+  viewport: {
+    width: "device-width",
+    initialScale: 1,
+    maximumScale: 1,
+  },
 };
 
 // Inlined before React hydration so the correct class is applied
 // synchronously — avoids a flash of the wrong theme.
-const themeScript = `(function(){try{var t=localStorage.getItem('vestflow-theme');if(t==='light'){document.documentElement.classList.remove('dark');}else{document.documentElement.classList.add('dark');}}catch(e){document.documentElement.classList.add('dark');}})();`;
+const themeScript = `(function(){try{var t=localStorage.getItem('vestflow-theme')||'system';var d=t==='dark'||(t==='system'&&window.matchMedia('(prefers-color-scheme:dark)').matches);if(d){document.documentElement.classList.add('dark');}else{document.documentElement.classList.remove('dark');}}catch(e){document.documentElement.classList.add('dark');}})();`;
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
