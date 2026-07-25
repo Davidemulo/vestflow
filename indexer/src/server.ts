@@ -12,7 +12,7 @@
 
 import http from "http";
 import { URL } from "url";
-import { getCheckpoint, queryEvents, queryHistory } from "./db";
+import { getCheckpoint, getTvlStats, queryEvents, queryHistory } from "./db";
 import type { EventQueryParams } from "./types";
 
 const PORT = Number(process.env.INDEXER_PORT ?? "3001");
@@ -66,6 +66,23 @@ function handleHealth(res: http.ServerResponse): void {
     ok: true,
     checkpoint: getCheckpoint(),
   });
+}
+
+function handleTvl(
+  res: http.ServerResponse,
+  searchParams: URLSearchParams
+): void {
+  try {
+    const network = (searchParams.get("network") ?? "testnet") as "mainnet" | "testnet";
+    if (network !== "mainnet" && network !== "testnet") {
+      return json(res, 400, { error: "network must be mainnet or testnet" });
+    }
+    const stats = getTvlStats(network);
+    json(res, 200, stats);
+  } catch (error) {
+    console.error("[server] TVL query error:", error);
+    json(res, 500, { error: "Failed to compute TVL stats" });
+  }
 }
 
 function handleEvents(
@@ -144,6 +161,9 @@ function createServer(): http.Server {
 
       case "/events":
         return handleEvents(res, url.searchParams);
+
+      case "/stats/tvl":
+        return handleTvl(res, url.searchParams);
 
       default:
         if (historyMatch) {
