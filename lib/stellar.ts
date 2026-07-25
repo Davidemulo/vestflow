@@ -270,6 +270,7 @@ export function truncate(addr: string, prefixLen = 6, suffixLen = 4): string {
 
 export function vestingProgress(s: ScheduleData, now: number): number {
   if (now < s.start_time) return 0;
+  if (s.duration <= 0) return 100;
   const elapsed = now - s.start_time;
   return Math.min(100, Math.round((elapsed / s.duration) * 100));
 }

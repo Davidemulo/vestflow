@@ -32,6 +32,7 @@ export default function ScheduleDetailPage() {
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [err, setErr] = useState("");
   const [lastTxHash, setLastTxHash] = useState<string | null>(null);
+  const [shareUrl, setShareUrl] = useState("");
   const xlmPrice = useXlmPrice();
 
   const load = async () => {
@@ -42,6 +43,11 @@ export default function ScheduleDetailPage() {
   };
 
   useEffect(() => { load(); }, [id]);
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setShareUrl(`${window.location.origin}/app/schedule/${id}`);
+    }
+  }, [id]);
 
   const now = Math.floor(Date.now() / 1000);
 
@@ -254,7 +260,7 @@ export default function ScheduleDetailPage() {
           <div className="border-t border-white/5 pt-4">
             <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Shareable Link</p>
             <p className="font-mono text-xs text-zinc-400 break-all select-all">
-              {typeof window !== "undefined" ? window.location.href : `/app/schedule/${schedule.id}`}
+              {shareUrl || `/app/schedule/${schedule.id}`}
             </p>
           </div>
 
