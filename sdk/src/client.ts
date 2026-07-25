@@ -20,8 +20,10 @@ import type {
   ScheduleData,
   VestflowConfig,
   CreateScheduleParams,
+  CreateGradedScheduleParams,
   VestingKind,
 } from "./types";
+import { xlmToStroops } from "./utils";
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -66,7 +68,7 @@ const FALLBACK_ACCOUNT = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCW
  * const hash = await client.createSchedule({
  *   grantor: "G...",
  *   beneficiary: "G...",
- *   totalAmountXlm: 1000,
+ *   totalAmountXlm: "1000",
  *   startTime: Math.floor(Date.now() / 1000),
  *   durationDays: 365,
  *   cliffDays: 90,
@@ -180,6 +182,9 @@ export class VestflowClient {
           : "Linear",
       revocable: Boolean(raw.revocable),
       revoked: Boolean(raw.revoked),
+      paused: Boolean(raw.paused),
+      paused_duration: Number(raw.paused_duration ?? 0),
+      paused_at: Number(raw.paused_at ?? 0),
     };
   }
 
@@ -259,6 +264,44 @@ export class VestflowClient {
   }
 
   /**
+   * Return how many tokens are claimable for a schedule at a specific time.
+   */
+  async getClaimableAt(id: number, now: number, publicKey?: string): Promise<bigint> {
+    try {
+      const val = await this.simulate(
+        "claimable_amount",
+        [
+          nativeToScVal(id, { type: "u64" }),
+          nativeToScVal(now, { type: "u64" }),
+        ],
+        publicKey
+      );
+      return BigInt(scValToNative(val));
+    } catch {
+      return 0n;
+    }
+  }
+
+  /**
+   * Return how many tokens are vested for a schedule at a specific time.
+   */
+  async getVestedAmountAt(id: number, now: number, publicKey?: string): Promise<bigint> {
+    try {
+      const val = await this.simulate(
+        "vested_amount",
+        [
+          nativeToScVal(id, { type: "u64" }),
+          nativeToScVal(now, { type: "u64" }),
+        ],
+        publicKey
+      );
+      return BigInt(scValToNative(val));
+    } catch {
+      return 0n;
+    }
+  }
+
+  /**
    * Fetch claimable amounts for multiple schedule IDs in a single
    * simulation round-trip using the claimable_bulk contract view.
    *
@@ -280,15 +323,78 @@ export class VestflowClient {
   }
 
   /**
-   * Fetch all schedules ever created, with their claimable amounts.
+   * Fetch total vested amounts (earned, including already-claimed) for multiple
+   * schedule IDs in a single simulation round-trip using the vested_amount_bulk
+   * contract view.
+   *
+   * Results are in the same order as the input ids.
+   * Unknown IDs return 0n.
+   */
+  async getVestedAmountBulk(ids: number[], publicKey?: string): Promise<bigint[]> {
+    if (ids.length === 0) return [];
+    try {
+      const idsVal = xdr.ScVal.scvVec(
+        ids.map((id) => nativeToScVal(id, { type: "u64" }))
+      );
+      const val = await this.simulate("vested_amount_bulk", [idsVal], publicKey);
+      const native = scValToNative(val) as bigint[];
+      return native.map((v) => BigInt(v));
+    } catch {
+      return ids.map(() => 0n);
+    }
+  }
+
+  /**
+   * Fetch multiple schedules in a single simulation round-trip.
+   *
+   * Returns results in the same order as `ids`. Unknown IDs return null.
+   * Replaces the Promise.all(getSchedule) N-call pattern.
+   */
+  async getScheduleBatch(ids: number[], publicKey?: string): Promise<(ScheduleData | null)[]> {
+    if (ids.length === 0) return [];
+    try {
+      const idsVal = xdr.ScVal.scvVec(
+        ids.map((id) => nativeToScVal(id, { type: "u64" }))
+      );
+      const val = await this.simulate("get_schedule_batch", [idsVal], publicKey);
+      const rawItems = scValToNative(val) as any[];
+      return rawItems.map((raw: any) => (raw == null ? null : this.parseSchedule(raw)));
+    } catch {
+      return ids.map(() => null);
+    }
+  }
+
+  /**
+   * Preview how many tokens will be claimable at an arbitrary future timestamp.
+   *
+   * The result reflects current schedule state projected to `ts` — most
+   * meaningful for future timestamps.
+   * Returns 0n for unknown schedule IDs.
+   */
+  async getClaimableAtTimestamp(id: number, ts: number, publicKey?: string): Promise<bigint> {
+    try {
+      const val = await this.simulate(
+        "claimable_at_timestamp",
+        [nativeToScVal(id, { type: "u64" }), nativeToScVal(ts, { type: "u64" })],
+        publicKey
+      );
+      return BigInt(scValToNative(val));
+    } catch {
+      return 0n;
+    }
+  }
+
+  /**
+   * Fetch all schedules ever created.
+   *
+   * Uses get_schedule_batch to fetch all schedules in a single simulation
+   * round-trip instead of N individual calls.
    */
   async getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
     const count = await this.getScheduleCount();
     if (count === 0) return [];
     const ids = Array.from({ length: count }, (_, i) => i + 1);
-    const schedules = await Promise.all(
-      ids.map((id) => this.getSchedule(id, publicKey))
-    );
+    const schedules = await this.getScheduleBatch(ids, publicKey);
     return schedules.filter(Boolean) as ScheduleData[];
   }
 
@@ -305,7 +411,7 @@ export class VestflowClient {
     params: CreateScheduleParams,
     signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
   ): Promise<string> {
-    const totalStroops = BigInt(Math.round(params.totalAmountXlm * 10_000_000));
+    const totalStroops = xlmToStroops(params.totalAmountXlm);
     const durationSecs = params.durationDays * 86400;
     const cliffSecs = params.cliffDays * 86400;
     const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(params.kind)]);
@@ -322,6 +428,52 @@ export class VestflowClient {
       nativeToScVal(params.revocable, { type: "bool" }),
     ];
     return this.buildAndSend(params.grantor, "create_schedule", args, signer);
+  }
+
+  /**
+   * Create a new graded (percentage-based) vesting schedule.
+   *
+   * Tokens unlock at discrete milestones. All milestones must sum to exactly
+   * 10 000 bps. The last milestone's `offsetDays` defines the total duration.
+   *
+   * @param params - Graded schedule parameters including milestone list
+   * @param signer - Function that signs the transaction XDR (e.g. Freighter's signTransaction)
+   * @returns Transaction hash
+   */
+  async createGradedSchedule(
+    params: CreateGradedScheduleParams,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    const totalStroops = BigInt(Math.round(params.totalAmountXlm * 10_000_000));
+    const lockupSecs = params.lockupDays * 86400;
+
+    const milestonesVal = xdr.ScVal.scvVec(
+      params.milestones.map((m) => {
+        const offsetSecs = BigInt(m.offsetDays * 86400);
+        return xdr.ScVal.scvMap([
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("bps"),
+            val: nativeToScVal(m.bps, { type: "u32" }),
+          }),
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("offset_secs"),
+            val: nativeToScVal(offsetSecs, { type: "u64" }),
+          }),
+        ]);
+      })
+    );
+
+    const args: xdr.ScVal[] = [
+      nativeToScVal(params.grantor, { type: "address" }),
+      nativeToScVal(params.beneficiary, { type: "address" }),
+      nativeToScVal(this.nativeToken, { type: "address" }),
+      nativeToScVal(totalStroops, { type: "i128" }),
+      nativeToScVal(params.startTime, { type: "u64" }),
+      nativeToScVal(lockupSecs, { type: "u64" }),
+      nativeToScVal(params.revocable, { type: "bool" }),
+      milestonesVal,
+    ];
+    return this.buildAndSend(params.grantor, "create_graded_schedule", args, signer);
   }
 
   /**
@@ -363,6 +515,76 @@ export class VestflowClient {
       publicKey,
       "revoke",
       [nativeToScVal(scheduleId, { type: "u64" })],
+      signer
+    );
+  }
+
+  /**
+   * Pause an active vesting schedule (grantor only).
+   * While paused, no additional tokens vest. The beneficiary can still claim
+   * already-vested tokens.
+   *
+   * @param publicKey - Grantor's Stellar public key
+   * @param scheduleId - ID of the schedule to pause
+   * @param signer - Function that signs the transaction XDR
+   * @returns Transaction hash
+   */
+  async pauseSchedule(
+    publicKey: string,
+    scheduleId: number,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      publicKey,
+      "pause_schedule",
+      [nativeToScVal(scheduleId, { type: "u64" })],
+      signer
+    );
+  }
+
+  /**
+   * Resume a paused vesting schedule (grantor only).
+   *
+   * @param publicKey - Grantor's Stellar public key
+   * @param scheduleId - ID of the schedule to resume
+   * @param signer - Function that signs the transaction XDR
+   * @returns Transaction hash
+   */
+  async resumeSchedule(
+    publicKey: string,
+    scheduleId: number,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      publicKey,
+      "resume_schedule",
+      [nativeToScVal(scheduleId, { type: "u64" })],
+      signer
+    );
+  }
+
+  /**
+   * Transfer beneficiary of a vesting schedule (current beneficiary only).
+   *
+   * @param currentBeneficiary - Current beneficiary's Stellar public key (signs the transaction)
+   * @param scheduleId - ID of the schedule to transfer
+   * @param newBeneficiary - New beneficiary's Stellar public key
+   * @param signer - Function that signs the transaction XDR
+   * @returns Transaction hash
+   */
+  async transferBeneficiary(
+    currentBeneficiary: string,
+    scheduleId: number,
+    newBeneficiary: string,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      currentBeneficiary,
+      "transfer_beneficiary",
+      [
+        nativeToScVal(scheduleId, { type: "u64" }),
+        nativeToScVal(newBeneficiary, { type: "address" }),
+      ],
       signer
     );
   }

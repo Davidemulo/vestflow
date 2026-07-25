@@ -1,4 +1,5 @@
 import {
+  getAllScheduleIds,
   getSubscriptionsBySchedule,
   recordNotificationEvent,
   hasMilestoneBeenProcessed,
@@ -13,7 +14,6 @@ import { getSchedule, getClaimable } from "./stellar";
 
 export async function processNotifications(): Promise<void> {
   try {
-    const { getAllScheduleIds } = await import("./db");
     const scheduleIds = getAllScheduleIds();
     
     if (scheduleIds.length === 0) {

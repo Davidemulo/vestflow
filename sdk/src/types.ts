@@ -39,6 +39,12 @@ export interface ScheduleData {
   revocable: boolean;
   /** Whether this schedule has been revoked. */
   revoked: boolean;
+  /** Whether this schedule is currently paused. */
+  paused: boolean;
+  /** Cumulative time (in seconds) the schedule has been paused. */
+  paused_duration: number;
+  /** Unix timestamp when the schedule was last paused (0 if not paused). */
+  paused_at: number;
 }
 
 /**
@@ -75,8 +81,8 @@ export interface CreateScheduleParams {
   grantor: string;
   /** Stellar public key of the beneficiary. */
   beneficiary: string;
-  /** Total amount to vest in XLM (converted to stroops internally). */
-  totalAmountXlm: number;
+  /** Total amount to vest in XLM as a decimal string (converted to stroops internally). */
+  totalAmountXlm: string;
   /** Unix timestamp when vesting begins. */
   startTime: number;
   /** Vesting duration in days. */
@@ -87,4 +93,42 @@ export interface CreateScheduleParams {
   kind: VestingKind;
   /** Whether the grantor can revoke unvested tokens. */
   revocable: boolean;
+}
+
+/**
+ * A single unlock milestone for a graded vesting schedule.
+ *
+ * `offsetDays` — days after `startTime` when this tranche unlocks.
+ * `bps`        — basis points (out of 10 000) of `totalAmountXlm` that unlock.
+ *
+ * All milestones in a schedule must sum to exactly 10 000 bps.
+ */
+export interface GradedMilestone {
+  /** Days after startTime when this tranche unlocks. */
+  offsetDays: number;
+  /** Basis points (out of 10 000) of total amount that unlock at this milestone. */
+  bps: number;
+}
+
+/**
+ * Parameters for creating a new graded (percentage-based) vesting schedule.
+ */
+export interface CreateGradedScheduleParams {
+  /** Stellar public key of the grantor (must sign the transaction). */
+  grantor: string;
+  /** Stellar public key of the beneficiary. */
+  beneficiary: string;
+  /** Total amount to vest in XLM (converted to stroops internally). */
+  totalAmountXlm: number;
+  /** Unix timestamp when vesting begins. */
+  startTime: number;
+  /** Lockup duration in days — tokens are earned but non-transferable until this date. */
+  lockupDays: number;
+  /** Whether the grantor can revoke unvested tokens. */
+  revocable: boolean;
+  /**
+   * Ordered list of unlock milestones.
+   * Must be non-empty and sum to exactly 10 000 bps.
+   */
+  milestones: GradedMilestone[];
 }

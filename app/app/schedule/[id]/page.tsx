@@ -7,8 +7,11 @@ import { useToast } from "@/components/Toast";
 import VestingChart from "@/components/VestingChart";
 import ClaimModal from "@/components/ClaimModal";
 import AddressLabel from "@/components/AddressLabel";
+import BeneficiaryQrModal from "@/components/BeneficiaryQrModal";
 import {
   getSchedule,
+  getClaimableAtTimestamp,
+  transferGrantor,
   ScheduleData,
   stroopsToXlm,
   vestingProgress,
@@ -21,25 +24,43 @@ import {
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useXlmPrice, formatUsd } from "@/lib/price";
+import { ScheduleDetailSkeleton } from "@/components/ScheduleCardSkeleton";
+import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
 
 export default function ScheduleDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { publicKey } = useWallet();
   const { addToast, updateToast } = useToast();
+  const { addRecentlyViewed } = useRecentlyViewed();
   const [schedule, setSchedule] = useState<ScheduleData | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<"claim" | "revoke" | null>(null);
   const [showClaimModal, setShowClaimModal] = useState(false);
+  const [showBeneficiaryQr, setShowBeneficiaryQr] = useState(false);
   const [err, setErr] = useState("");
   const [lastTxHash, setLastTxHash] = useState<string | null>(null);
   const [shareUrl, setShareUrl] = useState("");
   const xlmPrice = useXlmPrice();
+
+  // Future preview state (#258)
+  const [previewDate, setPreviewDate] = useState("");
+  const [previewAmount, setPreviewAmount] = useState<bigint | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  // Transfer grantor state (#262)
+  const [showTransferGrantor, setShowTransferGrantor] = useState(false);
+  const [newGrantorInput, setNewGrantorInput] = useState("");
+  const [transferGrantorLoading, setTransferGrantorLoading] = useState(false);
+  const [transferGrantorErr, setTransferGrantorErr] = useState("");
 
   const load = async () => {
     setLoading(true);
     const s = await getSchedule(Number(id), publicKey ?? undefined);
     setSchedule(s);
     setLoading(false);
+    if (s) {
+      addRecentlyViewed(s.id);
+    }
   };
 
   useEffect(() => { load(); }, [id]);
@@ -78,11 +99,42 @@ export default function ScheduleDetailPage() {
     finally { setActionLoading(null); }
   };
 
+  const handlePreviewDate = async (date: string) => {
+    setPreviewDate(date);
+    if (!date || !schedule) { setPreviewAmount(null); return; }
+    setPreviewLoading(true);
+    const ts = Math.floor(new Date(date).getTime() / 1000);
+    const amount = await getClaimableAtTimestamp(schedule.id, ts, publicKey ?? undefined);
+    setPreviewAmount(amount);
+    setPreviewLoading(false);
+  };
+
+  const handleTransferGrantor = async () => {
+    if (!publicKey || !schedule || !newGrantorInput.trim()) return;
+    setTransferGrantorLoading(true);
+    setTransferGrantorErr("");
+    const toastId = addToast({ status: "pending", title: "Transfer pending…", message: "Waiting for transaction to confirm." });
+    try {
+      const hash = await transferGrantor(publicKey, schedule.id, newGrantorInput.trim());
+      setLastTxHash(hash);
+      updateToast(toastId, { status: "success", title: "Grantor transferred", message: "Rights moved to the new address.", txHash: hash, network: NETWORK });
+      setShowTransferGrantor(false);
+      setNewGrantorInput("");
+      await load();
+    } catch (e: any) {
+      const msg = parseContractError(e);
+      setTransferGrantorErr(msg);
+      updateToast(toastId, { status: "error", title: "Transfer failed", message: msg });
+    } finally {
+      setTransferGrantorLoading(false);
+    }
+  };
+
   if (loading) return (
     <>
       <Navbar />
       <main className="max-w-3xl mx-auto px-6 pt-28 pb-20">
-        <div className="h-96 rounded-2xl bg-white/3 animate-pulse" />
+        <ScheduleDetailSkeleton />
       </main>
     </>
   );
@@ -211,14 +263,23 @@ export default function ScheduleDetailPage() {
                 editable
                 secondaryClassName="text-xs font-mono text-zinc-500 break-all"
               />
-              <a
-                href={`https://stellar.expert/explorer/${NETWORK}/account/${schedule.beneficiary}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-1 inline-block text-xs text-violet-300 hover:text-violet-200 transition-colors"
-              >
-                View on Stellar Expert →
-              </a>
+              <div className="mt-1 flex items-center gap-3 flex-wrap">
+                <a
+                  href={`https://stellar.expert/explorer/${NETWORK}/account/${schedule.beneficiary}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-block text-xs text-violet-300 hover:text-violet-200 transition-colors"
+                >
+                  View on Stellar Expert →
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setShowBeneficiaryQr(true)}
+                  className="inline-block text-xs text-violet-300 hover:text-violet-200 transition-colors"
+                >
+                  Show QR code
+                </button>
+              </div>
             </div>
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Total Amount</p>
@@ -242,7 +303,7 @@ export default function ScheduleDetailPage() {
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">End Date</p>
               <p className="text-zinc-300">{formatDate(schedule.start_time + schedule.duration)}</p>
             </div>
-            {schedule.cliff_duration > 0 && (
+            {schedule.kind !== "Linear" && schedule.cliff_duration > 0 && (
               <div>
                 <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Cliff Date</p>
                 <p className="text-zinc-300">{formatCliffDate(schedule.cliff_duration, schedule.start_time)}</p>
@@ -255,6 +316,31 @@ export default function ScheduleDetailPage() {
               </a>
             </div>
           </div>
+
+          {/* Future claimable preview (#258) */}
+          {!schedule.revoked && (
+            <div className="border-t border-white/5 pt-4">
+              <p className="text-zinc-500 text-xs uppercase tracking-wider mb-2">Preview Claimable At Date</p>
+              <div className="flex items-center gap-3 flex-wrap">
+                <input
+                  type="date"
+                  value={previewDate}
+                  onChange={(e) => handlePreviewDate(e.target.value)}
+                  className="input text-sm px-3 py-1.5 rounded-lg bg-zinc-800/60 border border-zinc-700 text-zinc-200 focus:outline-none focus:border-violet-500"
+                />
+                {previewLoading && <span className="text-xs text-zinc-500">Calculating…</span>}
+                {!previewLoading && previewAmount !== null && (
+                  <span className="text-sm text-zinc-300">
+                    <span className="font-semibold text-violet-300">{stroopsToXlm(previewAmount)} XLM</span>
+                    {xlmPrice !== null && previewAmount > 0n && (
+                      <span className="text-zinc-500 ml-1">({(Number(previewAmount) / 10_000_000 * xlmPrice).toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 })})</span>
+                    )}
+                    <span className="text-zinc-500 ml-1">claimable</span>
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Share link */}
           <div className="border-t border-white/5 pt-4">
@@ -303,6 +389,47 @@ export default function ScheduleDetailPage() {
                   {actionLoading === "revoke" ? "Processing…" : "Revoke Schedule"}
                 </button>
               )}
+              {isGrantor && (
+                <button
+                  onClick={() => { setShowTransferGrantor((v) => !v); setTransferGrantorErr(""); }}
+                  className="rounded-xl px-5 py-2.5 border border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors text-sm"
+                >
+                  Transfer Grantor Rights
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Transfer grantor form (#262) */}
+          {showTransferGrantor && isGrantor && (
+            <div className="flex flex-col gap-3 bg-zinc-900/50 rounded-xl p-4 border border-zinc-800">
+              <p className="text-sm text-zinc-300 font-medium">Transfer Grantor Rights</p>
+              <p className="text-xs text-zinc-500">Move revocation and pause rights to a new address. This action requires your wallet signature.</p>
+              <input
+                type="text"
+                placeholder="New grantor address (G…)"
+                value={newGrantorInput}
+                onChange={(e) => setNewGrantorInput(e.target.value)}
+                className="input text-sm"
+              />
+              {transferGrantorErr && (
+                <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{transferGrantorErr}</p>
+              )}
+              <div className="flex gap-2">
+                <button
+                  onClick={handleTransferGrantor}
+                  disabled={transferGrantorLoading || !newGrantorInput.trim()}
+                  className="btn-primary rounded-xl px-4 py-2 text-sm font-semibold disabled:opacity-60"
+                >
+                  {transferGrantorLoading ? "Processing…" : "Confirm Transfer"}
+                </button>
+                <button
+                  onClick={() => { setShowTransferGrantor(false); setNewGrantorInput(""); setTransferGrantorErr(""); }}
+                  className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors px-4 py-2"
+                >
+                  Cancel
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -315,6 +442,12 @@ export default function ScheduleDetailPage() {
         open={showClaimModal}
         onClose={() => setShowClaimModal(false)}
         onSuccess={() => { setShowClaimModal(false); load(); }}
+      />
+
+      <BeneficiaryQrModal
+        address={schedule.beneficiary}
+        open={showBeneficiaryQr}
+        onClose={() => setShowBeneficiaryQr(false)}
       />
     </>
   );
