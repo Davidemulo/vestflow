@@ -7,6 +7,7 @@ import { useToast } from "@/components/Toast";
 import VestingChart from "@/components/VestingChart";
 import ClaimModal from "@/components/ClaimModal";
 import AddressLabel from "@/components/AddressLabel";
+import BeneficiaryQrModal from "@/components/BeneficiaryQrModal";
 import {
   getSchedule,
   getClaimableAtTimestamp,
@@ -24,15 +25,18 @@ import {
 import { useWallet } from "@/lib/WalletContext";
 import { useXlmPrice, formatUsd } from "@/lib/price";
 import { ScheduleDetailSkeleton } from "@/components/ScheduleCardSkeleton";
+import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
 
 export default function ScheduleDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { publicKey } = useWallet();
   const { addToast, updateToast } = useToast();
+  const { addRecentlyViewed } = useRecentlyViewed();
   const [schedule, setSchedule] = useState<ScheduleData | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<"claim" | "revoke" | null>(null);
   const [showClaimModal, setShowClaimModal] = useState(false);
+  const [showBeneficiaryQr, setShowBeneficiaryQr] = useState(false);
   const [err, setErr] = useState("");
   const [lastTxHash, setLastTxHash] = useState<string | null>(null);
   const xlmPrice = useXlmPrice();
@@ -53,6 +57,9 @@ export default function ScheduleDetailPage() {
     const s = await getSchedule(Number(id), publicKey ?? undefined);
     setSchedule(s);
     setLoading(false);
+    if (s) {
+      addRecentlyViewed(s.id);
+    }
   };
 
   useEffect(() => { load(); }, [id]);
@@ -250,14 +257,23 @@ export default function ScheduleDetailPage() {
                 editable
                 secondaryClassName="text-xs font-mono text-zinc-500 break-all"
               />
-              <a
-                href={`https://stellar.expert/explorer/${NETWORK}/account/${schedule.beneficiary}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="mt-1 inline-block text-xs text-violet-300 hover:text-violet-200 transition-colors"
-              >
-                View on Stellar Expert →
-              </a>
+              <div className="mt-1 flex items-center gap-3 flex-wrap">
+                <a
+                  href={`https://stellar.expert/explorer/${NETWORK}/account/${schedule.beneficiary}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-block text-xs text-violet-300 hover:text-violet-200 transition-colors"
+                >
+                  View on Stellar Expert →
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setShowBeneficiaryQr(true)}
+                  className="inline-block text-xs text-violet-300 hover:text-violet-200 transition-colors"
+                >
+                  Show QR code
+                </button>
+              </div>
             </div>
             <div>
               <p className="text-zinc-500 text-xs uppercase tracking-wider mb-1">Total Amount</p>
@@ -420,6 +436,12 @@ export default function ScheduleDetailPage() {
         open={showClaimModal}
         onClose={() => setShowClaimModal(false)}
         onSuccess={() => { setShowClaimModal(false); load(); }}
+      />
+
+      <BeneficiaryQrModal
+        address={schedule.beneficiary}
+        open={showBeneficiaryQr}
+        onClose={() => setShowBeneficiaryQr(false)}
       />
     </>
   );
