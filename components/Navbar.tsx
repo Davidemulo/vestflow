@@ -3,6 +3,16 @@ import { NETWORK } from "@/lib/stellar";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import WalletButton from "./WalletButton";
+import CommandPalette from "./CommandPalette";
+
+function SearchIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <circle cx="11" cy="11" r="8" />
+      <path d="m21 21-4.3-4.3" />
+    </svg>
+  );
+}
 
 function SunIcon() {
   return (
@@ -35,6 +45,7 @@ export default function Navbar() {
   const [theme, setTheme] = useState<"light" | "dark" | "system" >("system");
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
   useEffect(() => {
     const stored = localStorage.getItem("vestflow-theme") as "light" | "dark" | "system" | null;
@@ -76,7 +87,19 @@ export default function Navbar() {
     return () => window.removeEventListener("click", handleClose);
   }, [dropdownOpen]);
 
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((v) => !v);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
+
   return (
+    <>
     <nav className="fixed top-0 left-0 right-0 z-50 flex items-center justify-between px-4 sm:px-6 py-4 border-b border-white/5 bg-[#08090f]/80 dark:bg-[#08090f]/80 backdrop-blur-md">
       <Link href="/" className="flex items-center gap-2 font-bold text-lg">
         <span className="text-xl">🔒</span>
@@ -97,6 +120,24 @@ export default function Navbar() {
       </div>
 
       <div className="flex items-center gap-2 sm:gap-3">
+        <button
+          onClick={() => setPaletteOpen(true)}
+          aria-label="Search schedules"
+          className="hidden sm:flex items-center gap-2 text-zinc-500 hover:text-white transition-colors border border-white/10 rounded-lg px-2.5 py-1.5 text-xs"
+        >
+          <SearchIcon />
+          <span>Search</span>
+          <span className="text-[10px] text-zinc-600 border border-white/10 rounded px-1 py-0.5 leading-none">
+            ⌘K
+          </span>
+        </button>
+        <button
+          onClick={() => setPaletteOpen(true)}
+          aria-label="Search schedules"
+          className="sm:hidden text-zinc-400 hover:text-white transition-colors p-1.5"
+        >
+          <SearchIcon />
+        </button>
         <span className={`hidden sm:inline text-xs px-2 py-0.5 rounded-full font-medium ${NETWORK === "mainnet" ? "bg-green-500/10 text-green-400 border border-green-500/20" : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"}`}>
           {NETWORK === "mainnet" ? "Mainnet" : "Testnet"}
         </span>
@@ -211,5 +252,8 @@ export default function Navbar() {
         </div>
       )}
     </nav>
+
+    <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+    </>
   );
 }
