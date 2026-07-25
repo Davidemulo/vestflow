@@ -105,6 +105,13 @@ export async function getSchedule(id: number, publicKey?: string): Promise<Sched
   } catch { return null; }
 }
 
+export async function isRevoked(id: number, publicKey?: string): Promise<boolean> {
+  try {
+    const val = await simulate("is_revoked", [nativeToScVal(id, { type: "u64" })], publicKey);
+    return Boolean(scValToNative(val));
+  } catch { return false; }
+}
+
 export async function getScheduleCount(): Promise<number> {
   try {
     const val = await simulate("schedule_count", []);

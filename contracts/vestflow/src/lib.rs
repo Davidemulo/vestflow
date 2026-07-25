@@ -1712,6 +1712,21 @@ impl VestFlowContract {
             .ok_or(VestFlowError::NotFound)
     }
 
+    /// Check whether a schedule has been revoked without loading the full schedule.
+    ///
+    /// Cheaper than `get_schedule` when the caller only needs to know revocation
+    /// status. Returns `false` for unknown schedule IDs (does not panic).
+    pub fn is_revoked(env: Env, schedule_id: u64) -> bool {
+        match env
+            .storage()
+            .instance()
+            .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
+        {
+            Some(schedule) => schedule.revoked,
+            None => false,
+        }
+    }
+
     /// Batch view: fetch multiple schedules in a single simulation round-trip.
     ///
     /// Returns `None` for unknown IDs rather than panicking, so callers can

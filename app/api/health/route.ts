@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { rpc as StellarRpc } from "@stellar/stellar-sdk";
 import { getDb } from "@/indexer/src/db";
 
 const RPC_URL = process.env.NEXT_PUBLIC_NETWORK === "mainnet"
@@ -21,6 +20,7 @@ export async function GET(): Promise<NextResponse> {
   }
 
   try {
+    const { rpc: StellarRpc } = await import("@stellar/stellar-sdk");
     const server = new StellarRpc.Server(RPC_URL);
     await server.getLatestLedger();
     checks.rpc = "healthy";
