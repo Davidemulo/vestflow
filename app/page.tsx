@@ -1,6 +1,9 @@
+"use client";
 import Link from "next/link";
 import Navbar from "@/components/Navbar";
 import CopyButton from "@/components/CopyButton";
+import { useCountUp } from "@/lib/useCountUp";
+import { useEffect, useState } from "react";
 
 const features = [
   { icon: "📈", title: "Linear Vesting", desc: "Tokens unlock gradually over the full vesting period — smooth and predictable." },
@@ -10,6 +13,44 @@ const features = [
   { icon: "⚡", title: "Instant Settlement", desc: "Claims settle in 3–5 seconds on Stellar. No waiting, no gas wars." },
   { icon: "🌐", title: "Any SAC Token", desc: "Works with XLM and any Stellar Asset Contract token including USDC." },
 ];
+
+function TvlCounter() {
+  const [tvl, setTvl] = useState<number | null>(null);
+  const [fiat, setFiat] = useState<string | null>(null);
+
+  useEffect(() => {
+    fetch("/api/stats/tvl?network=testnet")
+      .then((r) => r.json())
+      .then((data) => {
+        if (data?.tvl) {
+          const num = Number(data.tvl);
+          setTvl(num);
+          if (data.tvl_usd) {
+            setFiat(`~$${Number(data.tvl_usd).toLocaleString()}`);
+          }
+        }
+      })
+      .catch(() => {});
+  }, []);
+
+  const animated = useCountUp(tvl ?? 0, 2500, tvl !== null);
+
+  if (tvl === null) return null;
+
+  return (
+    <div className="mt-8 inline-flex items-center gap-3 bg-emerald-500/10 border border-emerald-500/20 rounded-full px-5 py-2 text-sm">
+      <span className="text-emerald-400 font-semibold">
+        {(animated / 10_000_000).toLocaleString(undefined, {
+          maximumFractionDigits: 0,
+        })}{" "}
+        XLM
+      </span>
+      <span className="text-zinc-500">|</span>
+      <span className="text-emerald-400/80">{fiat ?? "—"}</span>
+      <span className="text-zinc-500 text-xs">TVL</span>
+    </div>
+  );
+}
 
 export default function LandingPage() {
   return (
@@ -27,7 +68,8 @@ export default function LandingPage() {
           <p className="text-zinc-400 text-lg max-w-xl mx-auto mb-8">
             Create trustless vesting schedules for your team, advisors, and investors — powered by Soroban smart contracts on Stellar.
           </p>
-          <div className="flex gap-4 justify-center">
+          <TvlCounter />
+          <div className="flex gap-4 justify-center mt-8">
             <Link href="/app/create" className="btn-primary rounded-xl px-6 py-3 font-semibold text-white">
               Create a Schedule
             </Link>
