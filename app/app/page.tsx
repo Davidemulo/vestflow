@@ -14,6 +14,9 @@ import {
   getAllSchedules,
   getClaimableBulk,
   getVestedAmountBulk,
+  getGrantorScheduleIds,
+  getBeneficiaryScheduleIds,
+  getScheduleBatch,
   ScheduleData,
   vestingProgress,
   NATIVE_TOKEN,
@@ -141,9 +144,16 @@ export default function DashboardPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const all = await getAllSchedules(publicKey ?? undefined);
       if (publicKey) {
-        const userSchedules = all.filter(s => s.grantor === publicKey || s.beneficiary === publicKey);
+        // Use the on-chain grantor/beneficiary index instead of fetching all schedules.
+        const [grantorIds, beneficiaryIds] = await Promise.all([
+          getGrantorScheduleIds(publicKey),
+          getBeneficiaryScheduleIds(publicKey),
+        ]);
+        const allIds = [...new Set([...grantorIds, ...beneficiaryIds])].sort((a, b) => a - b);
+        const userSchedules = allIds.length > 0
+          ? (await getScheduleBatch(allIds, publicKey)).filter(Boolean) as ScheduleData[]
+          : [];
         setSchedules(userSchedules);
 
         // Compute aggregate stats
@@ -181,6 +191,7 @@ export default function DashboardPage() {
 
         setStats({ totalGranted, totalReceiving, claimableNow, totalVested, activeSchedules });
       } else {
+        const all = await getAllSchedules();
         setSchedules(all.slice(0, 6));
         setStats(null);
       }

@@ -1763,6 +1763,37 @@ impl VestFlowContract {
             .unwrap_or(vec![&env])
     }
 
+    /// Return **all** schedule IDs created by a given grantor, combining
+    /// single-token and multi-token schedules into a single list.
+    ///
+    /// The frontend can use this single view to load every schedule a
+    /// grantor has created without fetching the entire schedule space and
+    /// filtering client-side.
+    ///
+    /// Returns an empty vec if the grantor has not created any schedules.
+    pub fn grantor_schedule_ids(env: Env, grantor: Address) -> Vec<u64> {
+        let single: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GrantorSchedules(grantor.clone()))
+            .unwrap_or(vec![&env]);
+        let multi: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::GrantorMultiTokenSchedules(grantor))
+            .unwrap_or(vec![&env]);
+
+        let mut combined: Vec<u64> = vec![&env];
+        for id in single.iter() {
+            combined.push_back(id);
+        }
+        for id in multi.iter() {
+            combined.push_back(id);
+        }
+
+        combined
+    }
+
     /// Return schedule IDs where the given address is the beneficiary.
     ///
     /// Returns an empty vec if the address has no beneficiary schedules.
@@ -1771,6 +1802,34 @@ impl VestFlowContract {
             .instance()
             .get(&DataKey::BeneficiarySchedules(beneficiary))
             .unwrap_or(vec![&env])
+    }
+
+    /// Return **all** schedule IDs where the given address is the
+    /// beneficiary, combining single-token and multi-token schedules into
+    /// a single list.
+    ///
+    /// Returns an empty vec if the address has no beneficiary schedules.
+    pub fn beneficiary_schedule_ids(env: Env, beneficiary: Address) -> Vec<u64> {
+        let single: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::BeneficiarySchedules(beneficiary.clone()))
+            .unwrap_or(vec![&env]);
+        let multi: Vec<u64> = env
+            .storage()
+            .instance()
+            .get(&DataKey::BeneficiaryMultiTokenSchedules(beneficiary))
+            .unwrap_or(vec![&env]);
+
+        let mut combined: Vec<u64> = vec![&env];
+        for id in single.iter() {
+            combined.push_back(id);
+        }
+        for id in multi.iter() {
+            combined.push_back(id);
+        }
+
+        combined
     }
 
     /// Preview how many tokens are claimable at a specific timestamp.
