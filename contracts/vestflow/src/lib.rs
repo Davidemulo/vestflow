@@ -527,21 +527,38 @@ impl VestFlowContract {
         env.storage().instance().get(&DataKey::PendingUpgrade)
     }
 
+    /// Get the status of a pending upgrade: hash and executable timestamp.
+    ///
+    /// Allows users and governance tools to inspect a pending upgrade without
+    /// parsing raw storage keys. Returns the WASM hash and the timestamp when
+    /// execution becomes possible, or `None` if no upgrade is pending.
+    pub fn get_upgrade_status(env: Env) -> Option<(BytesN<32>, u64)> {
+        env.storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .map(|pending: PendingUpgrade| (pending.wasm_hash, pending.executable_at))
+    }
+
     /// Announce an upcoming contract WASM migration on-chain.
     ///
-    /// The WASM identified by `wasm_hash` should already be uploaded. This
-    /// function does not migrate the contract; it stores the pending upgrade
-    /// and emits an announcement event with an execution time 48 hours in the
-    /// future so users and monitoring systems can react before the change.
+    /// The WASM identified by `wasm_hash` must already be uploaded. This
+    /// function verifies the WASM exists before recording the announcement,
+    /// preventing announcement of non-existent WASM hashes.
     ///
     /// # Errors
     ///
     /// Panics with `"Upgrade authority not initialized"` if unset.
     /// Panics with `"Unauthorized upgrade authority"` if `authority` is not the configured authority.
+    /// Panics with `"WASM not found"` if the WASM hash has not been uploaded.
     pub fn announce_upgrade(env: Env, authority: Address, wasm_hash: BytesN<32>) -> PendingUpgrade {
         let configured = Self::read_upgrade_authority(&env);
         assert!(authority == configured, "Unauthorized upgrade authority");
         authority.require_auth();
+
+        env.deployer()
+            .get_contract_wasm(&wasm_hash)
+            .ok_or_else(|| panic!("WASM not found"))
+            .unwrap();
 
         let announced_at = env.ledger().timestamp();
         let pending = PendingUpgrade {
@@ -569,9 +586,13 @@ impl VestFlowContract {
 
     /// Cancel the currently pending upgrade announcement.
     ///
+    /// The upgrade may only be cancelled before the timelock expires. Once the
+    /// upgrade becomes executable, it cannot be cancelled through this function.
+    ///
     /// # Errors
     ///
     /// Panics with `"No pending upgrade"` when no upgrade is pending.
+    /// Panics with `"Upgrade already executable"` if the timelock has expired.
     pub fn cancel_upgrade(env: Env, authority: Address) {
         let configured = Self::read_upgrade_authority(&env);
         assert!(authority == configured, "Unauthorized upgrade authority");
@@ -581,6 +602,11 @@ impl VestFlowContract {
             .instance()
             .get(&DataKey::PendingUpgrade)
             .expect("No pending upgrade");
+
+        assert!(
+            env.ledger().timestamp() < pending.executable_at,
+            "Upgrade already executable"
+        );
 
         env.storage().instance().remove(&DataKey::PendingUpgrade);
         env.events().publish(
@@ -665,6 +691,7 @@ impl VestFlowContract {
     ///
     /// Panics with `"Amount must be positive"` if `total_amount` ≤ 0.
     /// Panics with `"Duration must be positive"` if `duration` = 0.
+    /// Panics with `"Duration must be at least 60 seconds"` if `duration` < 60.
     /// Panics with `"Cliff cannot exceed duration"` if `cliff_duration` > `duration`.
     /// Panics with `"Lockup cannot be less than cliff"` if `lockup_duration` < `cliff_duration`.
     /// Panics with `"Beneficiary must differ from grantor"` if `beneficiary == grantor`.
@@ -693,6 +720,9 @@ impl VestFlowContract {
         }
         if duration == 0 {
             return Err(VestFlowError::DurationZero);
+        }
+        if duration < 60 {
+            panic!("Duration must be at least 60 seconds");
         }
         if cliff_duration > duration {
             return Err(VestFlowError::CliffExceedsDuration);
