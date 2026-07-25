@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import Navbar from "@/components/Navbar";
 import ScheduleCard from "@/components/ScheduleCard";
+import RecentlyViewedSchedules from "@/components/RecentlyViewedSchedules";
 import { ScheduleListSkeleton } from "@/components/ScheduleCardSkeleton";
 import {
   NoSchedulesEmptyState,
@@ -20,6 +21,7 @@ import {
 import { useWallet } from "@/lib/WalletContext";
 import { useCountUp } from "@/hooks/useCountUp";
 import { useAddressBook } from "@/hooks/useAddressBook";
+import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
 import Link from "next/link";
 
 import { buildCombinedExportCSV, downloadCSV } from "@/lib/csvExport";
@@ -123,6 +125,7 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
 export default function DashboardPage() {
   const { publicKey } = useWallet();
   const { getLabel } = useAddressBook();
+  const { recentlyViewed } = useRecentlyViewed();
   const [schedules, setSchedules] = useState<ScheduleData[]>([]);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
@@ -185,6 +188,14 @@ export default function DashboardPage() {
   };
 
   useEffect(() => { load(); }, [publicKey]);
+
+  // Recently viewed schedules (#416), resolved from the wallet-filtered list
+  // and ordered most-recent-first.
+  const recentSchedules = useMemo(() => {
+    return recentlyViewed
+      .map((id) => schedules.find((s) => s.id === id))
+      .filter((s): s is ScheduleData => !!s);
+  }, [recentlyViewed, schedules]);
 
   // Apply role filter on top of the wallet-filtered list
   const roleFiltered = useMemo(() => {
@@ -325,6 +336,9 @@ export default function DashboardPage() {
 
         {/* Summary stats — animated count-up (#270) */}
         {publicKey && stats && <AnimatedStats stats={stats} />}
+
+        {/* Recently viewed schedules (#416) */}
+        {publicKey && <RecentlyViewedSchedules schedules={recentSchedules} />}
 
         {/* Role filter tabs (only when wallet connected and there are schedules) */}
         {publicKey && schedules.length > 0 && (
