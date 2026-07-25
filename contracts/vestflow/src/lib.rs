@@ -1880,6 +1880,55 @@ impl VestFlowContract {
         results
     }
 
+    /// View: return the sum of all unvested amounts for a given token.
+    ///
+    /// Iterates through all schedules and sums the unvested (unlocked but not claimed)
+    /// amounts for schedules using the specified token. Useful for protocol-level
+    /// tracking of total locked tokens by asset.
+    pub fn total_locked(env: Env, token: Address) -> i128 {
+        let count = Self::schedule_count(env.clone());
+        let now = env.ledger().timestamp();
+        let mut total: i128 = 0;
+
+        for id in 1..=count {
+            if let Some(schedule) = env
+                .storage()
+                .instance()
+                .get::<DataKey, VestingSchedule>(&DataKey::Schedule(id))
+            {
+                if schedule.token == token {
+                    let vested = schedule.vested_at(now);
+                    let unveiled = schedule.total_amount - vested;
+                    total = total.saturating_add(unveiled);
+                }
+            }
+        }
+        total
+    }
+
+    /// View: return the number of irrevocable schedules.
+    ///
+    /// Counts schedules where `revocable` is false. Useful for protocol-level
+    /// trust metrics — beneficiaries and investors care how many schedules
+    /// cannot be cancelled by the grantor.
+    pub fn irrevocable_count(env: Env) -> u64 {
+        let count = Self::schedule_count(env.clone());
+        let mut irrevocable: u64 = 0;
+
+        for id in 1..=count {
+            if let Some(schedule) = env
+                .storage()
+                .instance()
+                .get::<DataKey, VestingSchedule>(&DataKey::Schedule(id))
+            {
+                if !schedule.revocable {
+                    irrevocable += 1;
+                }
+            }
+        }
+        irrevocable
+    }
+
     /// Destroy a schedule and reclaim storage for fully-claimed, irrevocable schedules.
     ///
     /// Only callable by the beneficiary or grantor.
@@ -3621,5 +3670,159 @@ mod test {
         }]);
 
         client.destroy_schedule(&attacker, &id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #5)")]
+    fn test_error_amount_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &0, // AmountZero
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #6)")]
+    fn test_error_duration_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &0, // DurationZero
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #7)")]
+    fn test_error_cliff_exceeds_duration() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &500, // duration
+            &600, // cliff > duration
+            &0,
+            &VestingKind::Cliff,
+            &true,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #3)")]
+    fn test_error_already_revoked() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true, // revocable
+        );
+
+        set_time(&env, 1);
+        client.revoke(&grantor, &id);
+        client.revoke(&grantor, &id); // AlreadyRevoked
+    }
+
+    #[test]
+    fn test_views_total_locked_and_irrevocable_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+
+        // Create 3 schedules: 2 revocable, 1 irrevocable with 1000 tokens each
+        let _id1 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true, // revocable
+        );
+
+        let _id2 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false, // irrevocable
+        );
+
+        let _id3 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true, // revocable
+        );
+
+        // At time 0, all 3000 tokens should be unvested/locked
+        assert_eq!(client.total_locked(&token_addr), 3000);
+
+        // Should have exactly 1 irrevocable schedule
+        assert_eq!(client.irrevocable_count(), 1);
+
+        // At 50% vesting (500 seconds), 1500 should be locked
+        set_time(&env, 500);
+        assert_eq!(client.total_locked(&token_addr), 1500);
+
+        // irrevocable_count should still be 1
+        assert_eq!(client.irrevocable_count(), 1);
     }
 }
