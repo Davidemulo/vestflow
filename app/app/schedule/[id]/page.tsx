@@ -25,11 +25,13 @@ import {
 import { useWallet } from "@/lib/WalletContext";
 import { useXlmPrice, formatUsd } from "@/lib/price";
 import { ScheduleDetailSkeleton } from "@/components/ScheduleCardSkeleton";
+import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
 
 export default function ScheduleDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { publicKey } = useWallet();
   const { addToast, updateToast } = useToast();
+  const { addRecentlyViewed } = useRecentlyViewed();
   const [schedule, setSchedule] = useState<ScheduleData | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<"claim" | "revoke" | null>(null);
@@ -55,6 +57,9 @@ export default function ScheduleDetailPage() {
     const s = await getSchedule(Number(id), publicKey ?? undefined);
     setSchedule(s);
     setLoading(false);
+    if (s) {
+      addRecentlyViewed(s.id);
+    }
   };
 
   useEffect(() => { load(); }, [id]);
