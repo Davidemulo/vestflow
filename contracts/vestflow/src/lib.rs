@@ -31,6 +31,7 @@
 //! | `"Lockup cannot be less than cliff"` | `create_schedule` with `lockup_duration` < `cliff_duration`   |
 //! | `"Beneficiary must differ from grantor"` | `create_schedule` with `beneficiary == grantor`                 |
 //! | `"Start time cannot be in the past"` | `create_schedule` or `create_graded_schedule` with `start_time` < current ledger time |
+//! | `"Invalid token"` | `create_schedule` with a `token` address that is not a recognised Stellar Asset Contract |
 //! | `"Upgrade authority already initialized"` | `initialize_upgrade_authority` called more than once |
 //! | `"Upgrade authority not initialized"` | Upgrade announcement/execution attempted before authority setup |
 //! | `"Unauthorized upgrade authority"` | Upgrade action signed by an address other than the authority |
@@ -41,8 +42,8 @@
 //! | `"Performance oracle must be initialized before enabling milestones"` | `enable_performance_milestones` called before `initialize_performance_oracle` |
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
-    Env, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address,
+    BytesN, Env, Symbol, Vec, Val,
 };
 
 pub const VERSION: u32 = 1;
@@ -60,6 +61,7 @@ pub enum VestFlowError {
     CliffExceedsDuration = 7,
     ScheduleRevoked = 8,
     LockupLessThanCliff = 9,
+    InvalidToken = 10,
 }
 
 #[contracttype]
@@ -696,6 +698,7 @@ impl VestFlowContract {
     /// Panics with `"Lockup cannot be less than cliff"` if `lockup_duration` < `cliff_duration`.
     /// Panics with `"Beneficiary must differ from grantor"` if `beneficiary == grantor`.
     /// Panics with `"Start time cannot be in the past"` if `start_time` < current ledger time.
+    /// Returns `InvalidToken` if `token` is not a recognised Stellar Asset Contract.
     pub fn create_schedule(
         env: Env,
         grantor: Address,
@@ -747,6 +750,9 @@ impl VestFlowContract {
         // transactions in the same ledger can observe the same counter value,
         // so schedule ID collisions are impossible.
         let id = count + 1;
+
+        // Validate token is a recognised SAC before pulling funds.
+        validate_token_sac(&env, &token)?;
 
         // Pull tokens from grantor into the contract
         let contract_address = env.current_contract_address();
@@ -874,6 +880,11 @@ impl VestFlowContract {
             .unwrap_or(0);
         let id = count + 1;
 
+        // Validate token is a recognised SAC before pulling funds.
+        // Calling decimals() on a non-SAC address will fail at the host level.
+        validate_token_sac(&env, &token)?;
+
+        // Pull tokens from grantor into the contract
         let contract_address = env.current_contract_address();
         token::Client::new(&env, &token).transfer(&grantor, &contract_address, &total_amount);
 
@@ -1016,6 +1027,8 @@ impl VestFlowContract {
             if tranche.total_amount <= 0 {
                 return Err(VestFlowError::AmountZero);
             }
+            // Validate each token is a recognised SAC before pulling funds.
+            validate_token_sac(&env, &tranche.token)?;
             token::Client::new(&env, &tranche.token).transfer(
                 &grantor,
                 &contract_address,
@@ -1999,6 +2012,18 @@ impl VestFlowContract {
             (symbol_short!("destroyed"), schedule_id),
             (schedule.grantor, schedule.beneficiary, schedule.token),
         );
+    }
+}
+
+/// Validate that `token` is a recognised Stellar Asset Contract (SAC) by
+/// invoking the `decimals` method. Non-SAC addresses will cause the
+/// cross-contract call to fail, which we translate into `InvalidToken`.
+fn validate_token_sac(env: &Env, token: &Address) -> Result<(), VestFlowError> {
+    let func = soroban_sdk::Symbol::new(env, "decimals");
+    let args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::vec![env];
+    match env.try_invoke_contract(token, &func, args) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(VestFlowError::InvalidToken),
     }
 }
 
@@ -3824,5 +3849,30 @@ mod test {
 
         // irrevocable_count should still be 1
         assert_eq!(client.irrevocable_count(), 1);
+    }
+
+    #[test]
+    fn test_create_schedule_rejects_non_sac_token() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, _, _) = setup(&env);
+
+        // Use a random address that is NOT a deployed SAC contract.
+        let fake_token = Address::generate(&env);
+
+        set_time(&env, 0);
+        let result = client.try_create_schedule(
+            &grantor,
+            &beneficiary,
+            &fake_token,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), VestFlowError::InvalidToken);
     }
 }
