@@ -325,6 +325,16 @@ export function getTvlStats(network = parseNetwork(undefined)): TvlStats {
   };
 }
 
+/**
+ * Get all unique schedule IDs from events across all networks
+ */
+export function getAllScheduleIds(): number[] {
+  const rows = getDb()
+    .prepare("SELECT DISTINCT schedule_id FROM schedule_events WHERE schedule_id IS NOT NULL ORDER BY schedule_id")
+    .all() as { schedule_id: number }[];
+  return rows.map(r => r.schedule_id);
+}
+
 // ── Analytics ──────────────────────────────────────────────────────────
 
 export interface AnalyticsStats {
