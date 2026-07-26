@@ -17,6 +17,7 @@ import RevokeModal from "@/components/RevokeModal";
 import VestingChart from "@/components/VestingChart";
 import AddressLabel from "@/components/AddressLabel";
 import { useXlmPrice, formatUsd } from "@/lib/price";
+import { useCountdown, formatCountdown } from "@/hooks/useCountdown";
 
 export default function ScheduleCard({
   schedule,
@@ -35,6 +36,11 @@ export default function ScheduleCard({
   const progress = vestingProgress(schedule, now);
   const lockupEndsAt = schedule.start_time + schedule.lockup_duration;
   const isInLockup = schedule.lockup_duration > 0 && now < lockupEndsAt;
+
+  const cliffUnlockAt = schedule.start_time + schedule.cliff_duration;
+  const inCliffPeriod =
+    schedule.kind === "Cliff" && schedule.cliff_duration > 0 && now < cliffUnlockAt && !schedule.revoked;
+  const cliffCountdown = useCountdown(inCliffPeriod ? cliffUnlockAt : now);
 
   // Claimed percentage relative to total (for the dual progress bar)
   const claimedPct =
@@ -198,17 +204,16 @@ export default function ScheduleCard({
             </div>
 
             {/* Cliff label */}
-            {schedule.kind === "Cliff" &&
-              schedule.cliff_duration > 0 &&
-              now < schedule.start_time + schedule.cliff_duration &&
-              !schedule.revoked && (
-                <p className="text-xs text-zinc-500 mt-1.5">
-                  Unlocks on{" "}
-                  <span className="text-zinc-300">
-                    {formatCliffDate(schedule.cliff_duration, schedule.start_time)}
-                  </span>
-                </p>
-              )}
+            {inCliffPeriod && (
+              <p className="text-xs text-zinc-500 mt-1.5">
+                Unlocks on{" "}
+                <span className="text-zinc-300">
+                  {formatCliffDate(schedule.cliff_duration, schedule.start_time)}
+                </span>
+                {" "}
+                <span className="text-violet-400">({formatCountdown(cliffCountdown)})</span>
+              </p>
+            )}
           </>
         )}
 

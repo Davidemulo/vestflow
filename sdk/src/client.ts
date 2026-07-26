@@ -153,12 +153,48 @@ export class VestflowClient {
     );
     if (submitted.status === "ERROR") throw new Error("Transaction failed");
 
-    let status: any = { status: "PENDING" };
-    while (status.status === "PENDING" || status.status === "NOT_FOUND") {
-      await new Promise((r) => setTimeout(r, 1000));
-      status = await this.server.getTransaction(submitted.hash);
-    }
+    await this.waitForTransaction(submitted.hash);
     return submitted.hash;
+  }
+
+  // ── Poll ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Poll Soroban RPC for a submitted transaction's outcome until it settles
+   * (anything other than `NOT_FOUND`), backing off exponentially between
+   * polls to avoid hammering the RPC endpoint while still resolving quickly
+   * for fast-confirming transactions.
+   *
+   * @param hash - Transaction hash, e.g. as returned by `createSchedule`
+   * @param timeoutMs - Maximum total time to wait before giving up (default 30000ms)
+   * @param options - Optional backoff tuning
+   * @param options.initialDelayMs - Delay before the first poll retry (default 1000ms)
+   * @param options.maxDelayMs - Upper bound on the backoff delay (default 8000ms)
+   * @returns The settled transaction response (e.g. status `SUCCESS` or `FAILED`)
+   * @throws If the transaction is still `NOT_FOUND` when `timeoutMs` elapses
+   */
+  async waitForTransaction(
+    hash: string,
+    timeoutMs = 30_000,
+    options: { initialDelayMs?: number; maxDelayMs?: number } = {}
+  ): Promise<StellarRpc.Api.GetTransactionResponse> {
+    const initialDelayMs = options.initialDelayMs ?? 1000;
+    const maxDelayMs = options.maxDelayMs ?? 8000;
+    const deadline = Date.now() + timeoutMs;
+
+    let delay = initialDelayMs;
+    let status = await this.server.getTransaction(hash);
+    while (status.status === "NOT_FOUND") {
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for transaction ${hash} to confirm after ${timeoutMs}ms`
+        );
+      }
+      await new Promise((r) => setTimeout(r, delay));
+      delay = Math.min(delay * 2, maxDelayMs);
+      status = await this.server.getTransaction(hash);
+    }
+    return status;
   }
 
   // ── Internal: parse schedule ──────────────────────────────────────────────
