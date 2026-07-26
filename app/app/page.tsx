@@ -17,6 +17,7 @@ import {
   ScheduleData,
   vestingProgress,
   NATIVE_TOKEN,
+  stroopsToXlm,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useCountUp } from "@/hooks/useCountUp";
@@ -78,7 +79,7 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
     return () => cancelAnimationFrame(id);
   }, []);
 
-  const toXlm = (v: bigint) => Number(v) / 10_000_000;
+  const toXlm = (v: bigint) => parseFloat(stroopsToXlm(v));
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
