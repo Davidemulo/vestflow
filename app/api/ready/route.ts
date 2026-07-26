@@ -12,7 +12,7 @@ export async function GET(): Promise<NextResponse> {
     const latestLedger = await server.getLatestLedger();
     const checkpoint = getCheckpoint();
 
-    const isReady = checkpoint >= latestLedger.sequence;
+    const isReady = checkpoint > 0 && checkpoint >= latestLedger.sequence;
 
     if (!isReady) {
       return NextResponse.json(

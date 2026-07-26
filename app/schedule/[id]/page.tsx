@@ -8,7 +8,7 @@ import { formatCliffDate, formatDate, NETWORK } from "@/lib/stellar";
 import { useXlmPrice, formatUsd } from "@/lib/price";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface ScheduleData {
   id: number;
@@ -34,7 +34,16 @@ export default function PublicSchedulePage() {
   const [error, setError] = useState<string | null>(null);
   const [claimable, setClaimable] = useState("0");
   const [shareUrl, setShareUrl] = useState("");
+  const [simulating, setSimulating] = useState(false);
+  const [simulateResult, setSimulateResult] = useState<{ claimable_amount: string; vested_amount: string } | null>(null);
+  const [simulateError, setSimulateError] = useState<string | null>(null);
   const xlmPrice = useXlmPrice();
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!scheduleId) return;
@@ -82,8 +91,34 @@ export default function PublicSchedulePage() {
   };
 
   const formatAmount = (amount: string) => {
-    const num = Number(amount) / 10_000_000; // Convert stroops to XLM
-    return num.toLocaleString("en-US", { maximumFractionDigits: 7, minimumFractionDigits: 2 });
+    const whole = BigInt(amount) / 10_000_000n;
+    const frac = BigInt(amount) % 10_000_000n;
+    const xlm = Number(`${whole}.${frac.toString().padStart(7, "0")}`);
+    return xlm.toLocaleString("en-US", { maximumFractionDigits: 7, minimumFractionDigits: 2 });
+  };
+
+  const handleSimulateClaim = async () => {
+    if (!scheduleId) return;
+    setSimulating(true);
+    setSimulateError(null);
+    setSimulateResult(null);
+    try {
+      const res = await fetch("/api/schedules/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ schedule_id: Number(scheduleId) }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error((err as { error?: string }).error || "Simulation failed");
+      }
+      const data = await res.json();
+      setSimulateResult(data);
+    } catch (e: unknown) {
+      setSimulateError(e instanceof Error ? e.message : "Simulation failed");
+    } finally {
+      setSimulating(false);
+    }
   };
 
   if (loading) {
@@ -317,6 +352,40 @@ export default function PublicSchedulePage() {
           beneficiaryAddress={schedule.beneficiary}
         />
 
+        {/* Simulate Claim Section */}
+        <div className="card p-6 mb-6 border-emerald-500/20 bg-emerald-500/5">
+          <h3 className="font-semibold mb-2">Simulate Claim</h3>
+          <p className="text-sm text-zinc-400 mb-4">
+            Preview how much XLM is claimable right now — no wallet connection required.
+          </p>
+          <button
+            onClick={handleSimulateClaim}
+            disabled={simulating}
+            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 rounded font-semibold text-sm transition-colors"
+          >
+            {simulating ? "Simulating…" : "Simulate Claim"}
+          </button>
+          {simulateError && (
+            <p className="mt-3 text-sm text-red-400">{simulateError}</p>
+          )}
+          {simulateResult && (
+            <div className="mt-4 space-y-2 text-sm">
+              <div className="flex justify-between items-center py-2 border-b border-zinc-800">
+                <span className="text-zinc-400">Claimable now</span>
+                <span className="font-semibold text-emerald-400">
+                  {formatAmount(simulateResult.claimable_amount)} XLM
+                </span>
+              </div>
+              <div className="flex justify-between items-center py-2">
+                <span className="text-zinc-400">Total vested</span>
+                <span className="font-semibold">
+                  {formatAmount(simulateResult.vested_amount)} XLM
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+
         {/* Share Section */}
         <div className="card p-6 border-violet-500/20 bg-violet-500/5">
           <h3 className="font-semibold mb-3">Share This Schedule</h3>
@@ -329,13 +398,16 @@ export default function PublicSchedulePage() {
               className="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-700 rounded text-sm font-mono text-zinc-300"
             />
             <button
-              onClick={() => {
-                navigator.clipboard.writeText(shareUrl || `/schedule/${schedule.id}`);
-                alert("Link copied to clipboard!");
+              onClick={async () => {
+                await navigator.clipboard.writeText(shareUrl || `/schedule/${schedule.id}`);
+                setLinkCopied(true);
+                if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+                copyTimerRef.current = window.setTimeout(() => setLinkCopied(false), 1500);
               }}
+              aria-label="Copy share link"
               className="px-4 py-2 bg-violet-600 hover:bg-violet-700 rounded font-semibold transition-colors"
             >
-              Copy
+              {linkCopied ? "Copied!" : "Copy"}
             </button>
           </div>
         </div>
