@@ -138,7 +138,12 @@ export default function Navbar() {
         >
           <SearchIcon />
         </button>
-        <span className={`hidden sm:inline text-xs px-2 py-0.5 rounded-full font-medium ${NETWORK === "mainnet" ? "bg-green-500/10 text-green-400 border border-green-500/20" : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"}`}>
+        <span
+          title={NETWORK === "mainnet" ? "Connected to Stellar Mainnet" : "Connected to Stellar Testnet — funds are not real"}
+          aria-label={NETWORK === "mainnet" ? "Network: Mainnet" : "Network: Testnet"}
+          className={`hidden sm:inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-medium select-none ${NETWORK === "mainnet" ? "bg-green-500/10 text-green-400 border border-green-500/20" : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"}`}
+        >
+          <span className={`inline-block w-1.5 h-1.5 rounded-full ${NETWORK === "mainnet" ? "bg-green-400" : "bg-yellow-400 animate-pulse"}`} aria-hidden="true" />
           {NETWORK === "mainnet" ? "Mainnet" : "Testnet"}
         </span>
         <div className="relative">
@@ -232,8 +237,13 @@ export default function Navbar() {
         <WalletButton />
 
         {/* Network badge inline on mobile */}
-        <span className={`md:hidden text-[10px] px-1.5 py-0.5 rounded-full font-medium ${NETWORK === "mainnet" ? "bg-green-500/10 text-green-400 border border-green-500/20" : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"}`}>
-          {NETWORK === "mainnet" ? "M" : "T"}
+        <span
+          title={NETWORK === "mainnet" ? "Stellar Mainnet" : "Stellar Testnet"}
+          aria-label={NETWORK === "mainnet" ? "Network: Mainnet" : "Network: Testnet"}
+          className={`sm:hidden inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded-full font-medium select-none ${NETWORK === "mainnet" ? "bg-green-500/10 text-green-400 border border-green-500/20" : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"}`}
+        >
+          <span className={`inline-block w-1.5 h-1.5 rounded-full ${NETWORK === "mainnet" ? "bg-green-400" : "bg-yellow-400 animate-pulse"}`} aria-hidden="true" />
+          {NETWORK === "mainnet" ? "Main" : "Test"}
         </span>
       </div>
 

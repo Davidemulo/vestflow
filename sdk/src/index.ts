@@ -14,8 +14,10 @@ export {
   formatDate,
   parseContractError,
 } from "./utils";
+export { isScheduleRevoked } from "./types";
 export type {
   ScheduleData,
+  RevokedSchedule,
   VestflowConfig,
   CreateScheduleParams,
   CreateGradedScheduleParams,
