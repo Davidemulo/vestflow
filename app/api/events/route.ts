@@ -73,8 +73,36 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       next: { revalidate: 30 }, // Cache for 30s; events are append-only
     });
 
-    const data: unknown = await res.json();
-    return NextResponse.json(data, { status: res.status });
+    if (!res.ok) {
+      const errorBody = await res.text().catch(() => "");
+      return NextResponse.json(
+        {
+          error: `Indexer returned status ${res.status}`,
+          detail: errorBody || undefined,
+        },
+        { status: res.status }
+      );
+    }
+
+    const text = await res.text();
+    if (!text) {
+      return NextResponse.json(
+        { error: "Indexer returned an empty response — Soroban RPC may be unreachable." },
+        { status: 502 }
+      );
+    }
+
+    const data: unknown = JSON.parse(text);
+
+    // Validate that the response has the expected shape
+    if (typeof data !== "object" || data === null || !("events" in (data as Record<string, unknown>))) {
+      return NextResponse.json(
+        { error: "Indexer returned an unexpected response shape." },
+        { status: 502 }
+      );
+    }
+
+    return NextResponse.json(data);
   } catch {
     return NextResponse.json(
       {
