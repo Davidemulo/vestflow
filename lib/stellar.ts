@@ -112,6 +112,15 @@ export async function isRevoked(id: number, publicKey?: string): Promise<boolean
   } catch { return false; }
 }
 
+export async function getContractVersion(): Promise<number> {
+  try {
+    const val = await simulate("version", []);
+    return Number(scValToNative(val));
+  } catch {
+    return 1;
+  }
+}
+
 export async function getScheduleCount(): Promise<number> {
   try {
     const val = await simulate("schedule_count", []);
