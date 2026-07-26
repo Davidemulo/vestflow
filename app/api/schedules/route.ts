@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import {
   getClaimableBulk,
   getScheduleBatch,
@@ -84,65 +85,81 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const start = (page - 1) * limit;
     const paginatedIds = ids.slice(start, start + limit);
 
+    let payload: Record<string, unknown>;
+
     if (paginatedIds.length === 0) {
-      return NextResponse.json(
-        {
-          schedules: [],
-          total,
-          page,
-          totalPages,
-          network: NETWORK,
-        },
-        {
-          headers: {
-            "Cache-Control": "public, max-age=30, stale-while-revalidate=300",
-          },
-        }
-      );
-    }
+      payload = {
+        schedules: [],
+        total,
+        page,
+        totalPages,
+        network: NETWORK,
+      };
+    } else {
+      const paginatedSchedules = await getScheduleBatch(paginatedIds);
+      const claimableAmounts = await getClaimableBulk(paginatedIds);
+      const now = Math.floor(Date.now() / 1000);
 
-    const paginatedSchedules = await getScheduleBatch(paginatedIds);
-    const claimableAmounts = await getClaimableBulk(paginatedIds);
-    const now = Math.floor(Date.now() / 1000);
+      const schedules = paginatedSchedules
+        .map((s, i) => {
+          if (!s) return null;
+          const vested = vestedAmount(s, now);
+          const claimable = claimableAmounts[i] ?? 0n;
+          return {
+            id: s.id,
+            grantor: s.grantor,
+            beneficiary: s.beneficiary,
+            token: s.token,
+            total_amount: s.total_amount.toString(),
+            claimed: s.claimed.toString(),
+            start_time: s.start_time,
+            duration: s.duration,
+            cliff_duration: s.cliff_duration,
+            kind: s.kind,
+            revocable: s.revocable,
+            revoked: s.revoked,
+            vestedAmount: vested.toString(),
+            claimableAmount: claimable.toString(),
+          };
+        })
+        .filter(Boolean);
 
-    const schedules = paginatedSchedules
-      .map((s, i) => {
-        if (!s) return null;
-        const vested = vestedAmount(s, now);
-        const claimable = claimableAmounts[i] ?? 0n;
-        return {
-          id: s.id,
-          grantor: s.grantor,
-          beneficiary: s.beneficiary,
-          token: s.token,
-          total_amount: s.total_amount.toString(),
-          claimed: s.claimed.toString(),
-          start_time: s.start_time,
-          duration: s.duration,
-          cliff_duration: s.cliff_duration,
-          kind: s.kind,
-          revocable: s.revocable,
-          revoked: s.revoked,
-          vestedAmount: vested.toString(),
-          claimableAmount: claimable.toString(),
-        };
-      })
-      .filter(Boolean);
-
-    return NextResponse.json(
-      {
+      payload = {
         schedules,
         total,
         page,
         totalPages,
         network: NETWORK,
-      },
-      {
+      };
+    }
+
+    const jsonString = JSON.stringify(payload);
+    const etag = `"${crypto.createHash("md5").update(jsonString).digest("hex")}"`;
+    const ifNoneMatch = request.headers.get("if-none-match");
+
+    if (
+      ifNoneMatch &&
+      (ifNoneMatch === etag ||
+        ifNoneMatch === `W/${etag}` ||
+        ifNoneMatch.replace(/^W\//, "") === etag.replace(/^W\//, ""))
+    ) {
+      return new NextResponse(null, {
+        status: 304,
         headers: {
+          ETag: etag,
           "Cache-Control": "public, max-age=30, stale-while-revalidate=300",
         },
-      }
-    );
+      });
+    }
+
+    return new NextResponse(jsonString, {
+      status: 200,
+      headers: {
+        "Content-Type": "application/json",
+        ETag: etag,
+        "Cache-Control": "public, max-age=30, stale-while-revalidate=300",
+      },
+    });
   } catch (error) {
     console.error("Error fetching schedules by address:", error);
     return NextResponse.json(
@@ -151,3 +168,4 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     );
   }
 }
+
