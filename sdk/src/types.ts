@@ -12,6 +12,26 @@
 export type VestingKind = "Linear" | "Cliff" | "LinearWithCliff";
 
 /**
+ * A vesting schedule that has been revoked by the grantor.
+ * `isScheduleRevoked` narrows `ScheduleData` to this type.
+ */
+export interface RevokedSchedule extends ScheduleData {
+  readonly revoked: true;
+}
+
+/**
+ * Type guard that narrows `ScheduleData` to `RevokedSchedule`.
+ *
+ * @example
+ * if (isScheduleRevoked(schedule)) {
+ *   // TypeScript knows schedule.revoked === true here
+ * }
+ */
+export function isScheduleRevoked(s: ScheduleData): s is RevokedSchedule {
+  return s.revoked === true;
+}
+
+/**
  * A fully parsed vesting schedule returned from the contract.
  */
 export interface ScheduleData {
