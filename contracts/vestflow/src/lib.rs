@@ -1958,6 +1958,46 @@ impl VestFlowContract {
         results
     }
 
+    /// View: return the number of tokens that unlock at the cliff date for a
+    /// `Cliff` or `LinearWithCliff` schedule.
+    ///
+    /// | Kind              | Return value                                        |
+    /// |-------------------|-----------------------------------------------------|
+    /// | `Cliff`           | `total_amount` (everything unlocks at cliff)        |
+    /// | `LinearWithCliff` | 0 — the cliff itself unlocks nothing extra; linear  |
+    /// |                   | vesting begins at the cliff date                    |
+    /// | `Linear` / other  | 0 — no cliff concept applies                        |
+    /// | Unknown ID        | 0                                                   |
+    ///
+    /// The return value is in stroops (base token units). Beneficiaries can
+    /// compare this against `claimable()` to understand how much will become
+    /// available at the cliff without doing off-chain math.
+    pub fn cliff_unlock_amount(env: Env, schedule_id: u64) -> i128 {
+        let schedule: VestingSchedule = match env
+            .storage()
+            .instance()
+            .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
+        {
+            Some(s) => s,
+            None => return 0,
+        };
+
+        match schedule.kind {
+            VestingKind::Cliff => {
+                // For a pure Cliff schedule the entire amount unlocks at the
+                // cliff date; nothing vests before it.
+                schedule.total_amount
+            }
+            VestingKind::LinearWithCliff => {
+                // For LinearWithCliff the cliff date is the start of linear
+                // vesting — no discrete "cliff tranche" unlocks.  Return 0 so
+                // callers can distinguish this from Cliff schedules.
+                0
+            }
+            VestingKind::Linear | VestingKind::Graded => 0,
+        }
+    }
+
     /// View: return the sum of all unvested amounts for a given token.
     ///
     /// Iterates through all schedules and sums the unvested (unlocked but not claimed)
