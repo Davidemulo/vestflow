@@ -624,4 +624,88 @@ export class VestflowClient {
       signer
     );
   }
+
+  // ── Fee estimation (#448) ─────────────────────────────────────────────────
+
+  /**
+   * Estimate the network fee (in stroops) for a `claim` transaction.
+   *
+   * Uses Soroban simulation so the returned fee reflects the actual resource
+   * consumption of the claim operation for this schedule at this moment — the
+   * same mechanism the Stellar network uses to price the real transaction.
+   *
+   * @param scheduleId - The schedule to estimate the claim fee for.
+   * @param publicKey  - The beneficiary's public key (used as the transaction
+   *   source; required so the simulation uses the real account sequence number).
+   * @returns The estimated fee in stroops, or `null` when simulation fails
+   *   (e.g. unknown schedule ID, nothing to claim, network unreachable).
+   *
+   * @example
+   * const feeStroops = await client.estimateClaimFee(42, "G...");
+   * if (feeStroops !== null) {
+   *   console.log(`Estimated fee: ${stroopsToXlm(feeStroops)} XLM`);
+   * }
+   */
+  async estimateClaimFee(
+    scheduleId: number,
+    publicKey: string
+  ): Promise<bigint | null> {
+    try {
+      const contract = new Contract(this.contractId);
+      const account = await this.server.getAccount(publicKey);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(
+          contract.call(
+            "claim",
+            nativeToScVal(scheduleId, { type: "u64" })
+          )
+        )
+        .setTimeout(30)
+        .build();
+
+      const simResult = await this.server.simulateTransaction(tx);
+      if (StellarRpc.Api.isSimulationError(simResult)) {
+        return null;
+      }
+
+      // The simulation result carries the minimum resource fee required for
+      // this specific invocation.  Add BASE_FEE (inclusion fee) for the total.
+      const minResourceFee = BigInt(
+        (simResult as StellarRpc.Api.SimulateTransactionSuccessResponse)
+          .minResourceFee ?? 0
+      );
+      const inclusionFee = BigInt(BASE_FEE);
+      return minResourceFee + inclusionFee;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Return the cliff unlock amount (in stroops) for a `Cliff` schedule.
+   *
+   * Calls the `cliff_unlock_amount` contract view. Returns `0n` for
+   * `LinearWithCliff`, `Linear`, `Graded`, or unknown schedule IDs.
+   *
+   * @param scheduleId - The schedule to query.
+   * @param publicKey  - Optional public key used as the simulation source.
+   */
+  async getCliffUnlockAmount(
+    scheduleId: number,
+    publicKey?: string
+  ): Promise<bigint> {
+    try {
+      const val = await this.simulate(
+        "cliff_unlock_amount",
+        [nativeToScVal(scheduleId, { type: "u64" })],
+        publicKey
+      );
+      return BigInt(scValToNative(val));
+    } catch {
+      return 0n;
+    }
+  }
 }
