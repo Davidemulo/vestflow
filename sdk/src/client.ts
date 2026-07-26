@@ -425,13 +425,43 @@ export class VestflowClient {
    *
    * Uses get_schedule_batch to fetch all schedules in a single simulation
    * round-trip instead of N individual calls.
+   *
+   * @param publicKey - Optional source account for the read-only simulation.
+   * @param timeoutMs - Rejects with a clear timeout error if the RPC hasn't
+   * responded within this many milliseconds. Defaults to 30s.
    */
-  async getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
+  async getAllSchedules(
+    publicKey?: string,
+    timeoutMs = 30_000
+  ): Promise<ScheduleData[]> {
+    return this.withTimeout(
+      this.fetchAllSchedules(publicKey),
+      timeoutMs,
+      `getAllSchedules timed out after ${timeoutMs}ms waiting for the Soroban RPC`
+    );
+  }
+
+  private async fetchAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
     const count = await this.getScheduleCount();
     if (count === 0) return [];
     const ids = Array.from({ length: count }, (_, i) => i + 1);
     const schedules = await this.getScheduleBatch(ids, publicKey);
     return schedules.filter(Boolean) as ScheduleData[];
+  }
+
+  /**
+   * Race a promise against a deadline, rejecting with `message` if it fires first.
+   */
+  private withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    message: string
+  ): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    });
+    return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
   }
 
   // ── Write ─────────────────────────────────────────────────────────────────
