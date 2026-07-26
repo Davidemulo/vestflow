@@ -624,4 +624,106 @@ export class VestflowClient {
       signer
     );
   }
+
+  /**
+   * Subscribe to live updates for a vesting schedule by polling the chain at a
+   * configurable interval.
+   *
+   * The callback receives fresh {@link ScheduleData} (and the current claimable
+   * amount in stroops) on every successful poll. Call the returned `unsubscribe`
+   * function to stop polling and release resources.
+   *
+   * @example
+   * ```ts
+   * const { unsubscribe } = client.subscribeToSchedule(42, async (schedule, claimable) => {
+   *   console.log("Claimable:", claimable.toString(), "stroops");
+   *   console.log("Progress:", vestingProgress(schedule, Math.floor(Date.now() / 1000)), "%");
+   * });
+   *
+   * // Later — e.g. on component unmount:
+   * unsubscribe();
+   * ```
+   *
+   * @param id - Schedule ID to watch.
+   * @param callback - Called after every successful poll with the latest schedule
+   *   state and claimable amount. Errors thrown inside the callback are swallowed
+   *   so a transient UI error cannot kill the poller.
+   * @param options - Optional configuration.
+   * @param options.intervalMs - Poll interval in milliseconds. Defaults to 10 000 (10 s).
+   * @param options.publicKey - Wallet address used to simulate read-only calls.
+   *   Pass the beneficiary's key to get an accurate claimable amount.
+   * @param options.onError - Called when a poll fails. Defaults to `console.error`.
+   * @returns An object with an `unsubscribe()` teardown function.
+   */
+  /**
+   * Extend the vesting duration of an existing schedule (grantor only).
+   *
+   * Adds `additionalSeconds` to the schedule's current duration, pushing
+   * the end date forward without affecting the start time or already-vested
+   * amounts.
+   *
+   * @param grantor - Grantor's Stellar public key (must sign the transaction).
+   * @param scheduleId - ID of the schedule to extend.
+   * @param additionalSeconds - Number of seconds to add to the current duration.
+   * @param signer - Function that signs the transaction XDR.
+   * @returns Transaction hash.
+   */
+  async extendDuration(
+    grantor: string,
+    scheduleId: number,
+    additionalSeconds: number,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      grantor,
+      "extend_duration",
+      [
+        nativeToScVal(scheduleId, { type: "u64" }),
+        nativeToScVal(additionalSeconds, { type: "u64" }),
+      ],
+      signer
+    );
+  }
+
+  subscribeToSchedule(
+    id: number,
+    callback: (schedule: ScheduleData, claimable: bigint) => void | Promise<void>,
+    options: {
+      intervalMs?: number;
+      publicKey?: string;
+      onError?: (err: unknown) => void;
+    } = {}
+  ): { unsubscribe: () => void } {
+    const { intervalMs = 10_000, publicKey, onError = console.error } = options;
+
+    let active = true;
+
+    const poll = async () => {
+      if (!active) return;
+      try {
+        const schedule = await this.getSchedule(id, publicKey);
+        if (!active || schedule === null) return;
+        const claimable = await this.getClaimable(id, publicKey);
+        if (!active) return;
+        try {
+          await callback(schedule, claimable);
+        } catch {
+          // Swallow callback errors — the caller's UI should not kill the poller.
+        }
+      } catch (err) {
+        onError(err);
+      }
+    };
+
+    // Fire immediately, then on each interval tick.
+    void poll();
+    const timerId = setInterval(() => void poll(), intervalMs);
+
+    return {
+      unsubscribe: () => {
+        active = false;
+        clearInterval(timerId);
+      },
+    };
+  }
 }
