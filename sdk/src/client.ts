@@ -625,87 +625,105 @@ export class VestflowClient {
     );
   }
 
-  // ── Fee estimation (#448) ─────────────────────────────────────────────────
-
   /**
-   * Estimate the network fee (in stroops) for a `claim` transaction.
+   * Subscribe to live updates for a vesting schedule by polling the chain at a
+   * configurable interval.
    *
-   * Uses Soroban simulation so the returned fee reflects the actual resource
-   * consumption of the claim operation for this schedule at this moment — the
-   * same mechanism the Stellar network uses to price the real transaction.
-   *
-   * @param scheduleId - The schedule to estimate the claim fee for.
-   * @param publicKey  - The beneficiary's public key (used as the transaction
-   *   source; required so the simulation uses the real account sequence number).
-   * @returns The estimated fee in stroops, or `null` when simulation fails
-   *   (e.g. unknown schedule ID, nothing to claim, network unreachable).
+   * The callback receives fresh {@link ScheduleData} (and the current claimable
+   * amount in stroops) on every successful poll. Call the returned `unsubscribe`
+   * function to stop polling and release resources.
    *
    * @example
-   * const feeStroops = await client.estimateClaimFee(42, "G...");
-   * if (feeStroops !== null) {
-   *   console.log(`Estimated fee: ${stroopsToXlm(feeStroops)} XLM`);
-   * }
+   * ```ts
+   * const { unsubscribe } = client.subscribeToSchedule(42, async (schedule, claimable) => {
+   *   console.log("Claimable:", claimable.toString(), "stroops");
+   *   console.log("Progress:", vestingProgress(schedule, Math.floor(Date.now() / 1000)), "%");
+   * });
+   *
+   * // Later — e.g. on component unmount:
+   * unsubscribe();
+   * ```
+   *
+   * @param id - Schedule ID to watch.
+   * @param callback - Called after every successful poll with the latest schedule
+   *   state and claimable amount. Errors thrown inside the callback are swallowed
+   *   so a transient UI error cannot kill the poller.
+   * @param options - Optional configuration.
+   * @param options.intervalMs - Poll interval in milliseconds. Defaults to 10 000 (10 s).
+   * @param options.publicKey - Wallet address used to simulate read-only calls.
+   *   Pass the beneficiary's key to get an accurate claimable amount.
+   * @param options.onError - Called when a poll fails. Defaults to `console.error`.
+   * @returns An object with an `unsubscribe()` teardown function.
    */
-  async estimateClaimFee(
+  /**
+   * Extend the vesting duration of an existing schedule (grantor only).
+   *
+   * Adds `additionalSeconds` to the schedule's current duration, pushing
+   * the end date forward without affecting the start time or already-vested
+   * amounts.
+   *
+   * @param grantor - Grantor's Stellar public key (must sign the transaction).
+   * @param scheduleId - ID of the schedule to extend.
+   * @param additionalSeconds - Number of seconds to add to the current duration.
+   * @param signer - Function that signs the transaction XDR.
+   * @returns Transaction hash.
+   */
+  async extendDuration(
+    grantor: string,
     scheduleId: number,
-    publicKey: string
-  ): Promise<bigint | null> {
-    try {
-      const contract = new Contract(this.contractId);
-      const account = await this.server.getAccount(publicKey);
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: this.networkPassphrase,
-      })
-        .addOperation(
-          contract.call(
-            "claim",
-            nativeToScVal(scheduleId, { type: "u64" })
-          )
-        )
-        .setTimeout(30)
-        .build();
-
-      const simResult = await this.server.simulateTransaction(tx);
-      if (StellarRpc.Api.isSimulationError(simResult)) {
-        return null;
-      }
-
-      // The simulation result carries the minimum resource fee required for
-      // this specific invocation.  Add BASE_FEE (inclusion fee) for the total.
-      const minResourceFee = BigInt(
-        (simResult as StellarRpc.Api.SimulateTransactionSuccessResponse)
-          .minResourceFee ?? 0
-      );
-      const inclusionFee = BigInt(BASE_FEE);
-      return minResourceFee + inclusionFee;
-    } catch {
-      return null;
-    }
+    additionalSeconds: number,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      grantor,
+      "extend_duration",
+      [
+        nativeToScVal(scheduleId, { type: "u64" }),
+        nativeToScVal(additionalSeconds, { type: "u64" }),
+      ],
+      signer
+    );
   }
 
-  /**
-   * Return the cliff unlock amount (in stroops) for a `Cliff` schedule.
-   *
-   * Calls the `cliff_unlock_amount` contract view. Returns `0n` for
-   * `LinearWithCliff`, `Linear`, `Graded`, or unknown schedule IDs.
-   *
-   * @param scheduleId - The schedule to query.
-   * @param publicKey  - Optional public key used as the simulation source.
-   */
-  async getCliffUnlockAmount(
-    scheduleId: number,
-    publicKey?: string
-  ): Promise<bigint> {
-    try {
-      const val = await this.simulate(
-        "cliff_unlock_amount",
-        [nativeToScVal(scheduleId, { type: "u64" })],
-        publicKey
-      );
-      return BigInt(scValToNative(val));
-    } catch {
-      return 0n;
-    }
+  subscribeToSchedule(
+    id: number,
+    callback: (schedule: ScheduleData, claimable: bigint) => void | Promise<void>,
+    options: {
+      intervalMs?: number;
+      publicKey?: string;
+      onError?: (err: unknown) => void;
+    } = {}
+  ): { unsubscribe: () => void } {
+    const { intervalMs = 10_000, publicKey, onError = console.error } = options;
+
+    let active = true;
+
+    const poll = async () => {
+      if (!active) return;
+      try {
+        const schedule = await this.getSchedule(id, publicKey);
+        if (!active || schedule === null) return;
+        const claimable = await this.getClaimable(id, publicKey);
+        if (!active) return;
+        try {
+          await callback(schedule, claimable);
+        } catch {
+          // Swallow callback errors — the caller's UI should not kill the poller.
+        }
+      } catch (err) {
+        onError(err);
+      }
+    };
+
+    // Fire immediately, then on each interval tick.
+    void poll();
+    const timerId = setInterval(() => void poll(), intervalMs);
+
+    return {
+      unsubscribe: () => {
+        active = false;
+        clearInterval(timerId);
+      },
+    };
   }
 }

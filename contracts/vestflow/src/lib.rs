@@ -1629,6 +1629,56 @@ impl VestFlowContract {
         Ok(())
     }
 
+    /// Extend the vesting duration of an existing schedule.
+    ///
+    /// Only the **grantor** of the schedule may call this entry point.
+    /// The schedule must not be revoked.
+    ///
+    /// `additional_seconds` is added to the current `duration`, pushing the
+    /// end date forward without changing the `start_time` or any already-vested
+    /// amounts. This is equivalent to re-issuing the grant with a longer
+    /// horizon — useful when an employee stays beyond the original grant period.
+    ///
+    /// Emits an `"ext_dur"` event with `(schedule_id, old_duration, new_duration, timestamp)`.
+    ///
+    /// # Panics
+    ///
+    /// - `"Schedule not found"` — unknown `schedule_id`.
+    /// - `"Schedule has been revoked"` — cannot extend a revoked schedule.
+    /// - `"Additional seconds must be positive"` — zero extension is rejected.
+    pub fn extend_duration(
+        env: Env,
+        schedule_id: u64,
+        additional_seconds: u64,
+    ) -> Result<(), VestFlowError> {
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(VestFlowError::NotFound)?;
+
+        schedule.grantor.require_auth();
+
+        if schedule.revoked {
+            return Err(VestFlowError::AlreadyRevoked);
+        }
+        assert!(additional_seconds > 0, "Additional seconds must be positive");
+
+        let old_duration = schedule.duration;
+        schedule.duration = old_duration + additional_seconds;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(schedule_id), &schedule);
+
+        env.events().publish(
+            (symbol_short!("ext_dur"), schedule_id),
+            (old_duration, schedule.duration, env.ledger().timestamp()),
+        );
+
+        Ok(())
+    }
+
     /// Transfer grantor rights to a new address (current grantor only).
     ///
     /// Moves revocation and pause rights to `new_grantor`. Updates the grantor
