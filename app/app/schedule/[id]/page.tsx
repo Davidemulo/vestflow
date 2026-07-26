@@ -19,6 +19,7 @@ import {
   formatCliffDate,
   revokeSchedule,
   parseContractError,
+  truncate,
   NETWORK,
   NATIVE_TOKEN,
 } from "@/lib/stellar";
@@ -69,6 +70,17 @@ export default function ScheduleDetailPage() {
       setShareUrl(`${window.location.origin}/app/schedule/${id}`);
     }
   }, [id]);
+
+  // Distinguish this tab from other open schedule tabs — the layout's static
+  // "VestFlow" title otherwise makes every schedule page indistinguishable.
+  useEffect(() => {
+    if (!schedule) return;
+    const previousTitle = document.title;
+    document.title = `Schedule #${schedule.id} · ${truncate(schedule.beneficiary)} — VestFlow`;
+    return () => {
+      document.title = previousTitle;
+    };
+  }, [schedule]);
 
   const now = Math.floor(Date.now() / 1000);
 
