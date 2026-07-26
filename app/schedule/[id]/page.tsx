@@ -8,7 +8,7 @@ import { formatCliffDate, formatDate, NETWORK } from "@/lib/stellar";
 import { useXlmPrice, formatUsd } from "@/lib/price";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 interface ScheduleData {
   id: number;
@@ -34,7 +34,15 @@ export default function PublicSchedulePage() {
   const [error, setError] = useState<string | null>(null);
   const [claimable, setClaimable] = useState("0");
   const [shareUrl, setShareUrl] = useState("");
+  const [linkCopied, setLinkCopied] = useState(false);
+  const copyTimerRef = useRef<number | null>(null);
   const xlmPrice = useXlmPrice();
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (!scheduleId) return;
@@ -329,13 +337,16 @@ export default function PublicSchedulePage() {
               className="flex-1 px-3 py-2 bg-zinc-900 border border-zinc-700 rounded text-sm font-mono text-zinc-300"
             />
             <button
-              onClick={() => {
-                navigator.clipboard.writeText(shareUrl || `/schedule/${schedule.id}`);
-                alert("Link copied to clipboard!");
+              onClick={async () => {
+                await navigator.clipboard.writeText(shareUrl || `/schedule/${schedule.id}`);
+                setLinkCopied(true);
+                if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current);
+                copyTimerRef.current = window.setTimeout(() => setLinkCopied(false), 1500);
               }}
+              aria-label="Copy share link"
               className="px-4 py-2 bg-violet-600 hover:bg-violet-700 rounded font-semibold transition-colors"
             >
-              Copy
+              {linkCopied ? "Copied!" : "Copy"}
             </button>
           </div>
         </div>
