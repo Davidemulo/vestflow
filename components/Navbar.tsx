@@ -1,7 +1,7 @@
 "use client";
 import { NETWORK } from "@/lib/stellar";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import WalletButton from "./WalletButton";
 import CommandPalette from "./CommandPalette";
 
@@ -47,14 +47,22 @@ export default function Navbar() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
 
-  useEffect(() => {
-    const stored = localStorage.getItem("vestflow-theme") as "light" | "dark" | "system" | null;
-    if (stored) {
-      setTheme(stored);
-    }
-  }, []);
+  // Tracks whether we've already synced `theme` from localStorage, so the
+  // very first run of the effect below doesn't briefly re-apply the
+  // "system" default over the persisted preference before the stored value
+  // loads — that race is what made the theme look like it reset on load.
+  const themeLoaded = useRef(false);
 
   useEffect(() => {
+    if (!themeLoaded.current) {
+      themeLoaded.current = true;
+      const stored = localStorage.getItem("vestflow-theme") as "light" | "dark" | "system" | null;
+      if (stored && stored !== theme) {
+        setTheme(stored);
+        return;
+      }
+    }
+
     const applyTheme = () => {
       if (theme === "dark") {
         document.documentElement.classList.add("dark");
