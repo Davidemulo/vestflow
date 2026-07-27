@@ -55,5 +55,9 @@
     "blockchain",
     "sdk",
     "vestflow"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
 }
