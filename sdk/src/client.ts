@@ -406,6 +406,40 @@ export class VestflowClient {
   }
 
   /**
+   * Return the unvested remainder for a schedule — the amount a grantor would
+   * recover by revoking right now.
+   *
+   * The contract has no standalone `remaining_unvested` view, so this composes
+   * `total_amount` (from `get_schedule`) with the `vested_amount_current` view,
+   * mirroring the exact calculation `revoke()` uses on-chain (`total_amount - vested`).
+   *
+   * Returns 0n if the schedule does not exist.
+   */
+  async getRemainingUnvested(scheduleId: number, publicKey?: string): Promise<bigint> {
+    const schedule = await this.getSchedule(scheduleId, publicKey);
+    if (schedule === null) return 0n;
+    const vested = await this.getVestedAmountCurrent(scheduleId, publicKey);
+    const remaining = schedule.total_amount - vested;
+    return remaining > 0n ? remaining : 0n;
+  }
+
+  /**
+   * Return how many tokens are vested for a schedule using the current ledger time.
+   */
+  async getVestedAmountCurrent(id: number, publicKey?: string): Promise<bigint> {
+    try {
+      const val = await this.simulate(
+        "vested_amount_current",
+        [nativeToScVal(id, { type: "u64" })],
+        publicKey
+      );
+      return BigInt(scValToNative(val));
+    } catch {
+      return 0n;
+    }
+  }
+
+  /**
    * Preview how many tokens will be claimable at an arbitrary future timestamp.
    *
    * The result reflects current schedule state projected to `ts` — most
@@ -455,13 +489,43 @@ export class VestflowClient {
    *
    * Uses get_schedule_batch to fetch all schedules in a single simulation
    * round-trip instead of N individual calls.
+   *
+   * @param publicKey - Optional source account for the read-only simulation.
+   * @param timeoutMs - Rejects with a clear timeout error if the RPC hasn't
+   * responded within this many milliseconds. Defaults to 30s.
    */
-  async getAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
+  async getAllSchedules(
+    publicKey?: string,
+    timeoutMs = 30_000
+  ): Promise<ScheduleData[]> {
+    return this.withTimeout(
+      this.fetchAllSchedules(publicKey),
+      timeoutMs,
+      `getAllSchedules timed out after ${timeoutMs}ms waiting for the Soroban RPC`
+    );
+  }
+
+  private async fetchAllSchedules(publicKey?: string): Promise<ScheduleData[]> {
     const count = await this.getScheduleCount();
     if (count === 0) return [];
     const ids = Array.from({ length: count }, (_, i) => i + 1);
     const schedules = await this.getScheduleBatch(ids, publicKey);
     return schedules.filter(Boolean) as ScheduleData[];
+  }
+
+  /**
+   * Race a promise against a deadline, rejecting with `message` if it fires first.
+   */
+  private withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    message: string
+  ): Promise<T> {
+    let timer: ReturnType<typeof setTimeout>;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    });
+    return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
   }
 
   // ── Write ─────────────────────────────────────────────────────────────────
@@ -661,5 +725,107 @@ export class VestflowClient {
       ],
       signer
     );
+  }
+
+  /**
+   * Subscribe to live updates for a vesting schedule by polling the chain at a
+   * configurable interval.
+   *
+   * The callback receives fresh {@link ScheduleData} (and the current claimable
+   * amount in stroops) on every successful poll. Call the returned `unsubscribe`
+   * function to stop polling and release resources.
+   *
+   * @example
+   * ```ts
+   * const { unsubscribe } = client.subscribeToSchedule(42, async (schedule, claimable) => {
+   *   console.log("Claimable:", claimable.toString(), "stroops");
+   *   console.log("Progress:", vestingProgress(schedule, Math.floor(Date.now() / 1000)), "%");
+   * });
+   *
+   * // Later — e.g. on component unmount:
+   * unsubscribe();
+   * ```
+   *
+   * @param id - Schedule ID to watch.
+   * @param callback - Called after every successful poll with the latest schedule
+   *   state and claimable amount. Errors thrown inside the callback are swallowed
+   *   so a transient UI error cannot kill the poller.
+   * @param options - Optional configuration.
+   * @param options.intervalMs - Poll interval in milliseconds. Defaults to 10 000 (10 s).
+   * @param options.publicKey - Wallet address used to simulate read-only calls.
+   *   Pass the beneficiary's key to get an accurate claimable amount.
+   * @param options.onError - Called when a poll fails. Defaults to `console.error`.
+   * @returns An object with an `unsubscribe()` teardown function.
+   */
+  /**
+   * Extend the vesting duration of an existing schedule (grantor only).
+   *
+   * Adds `additionalSeconds` to the schedule's current duration, pushing
+   * the end date forward without affecting the start time or already-vested
+   * amounts.
+   *
+   * @param grantor - Grantor's Stellar public key (must sign the transaction).
+   * @param scheduleId - ID of the schedule to extend.
+   * @param additionalSeconds - Number of seconds to add to the current duration.
+   * @param signer - Function that signs the transaction XDR.
+   * @returns Transaction hash.
+   */
+  async extendDuration(
+    grantor: string,
+    scheduleId: number,
+    additionalSeconds: number,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      grantor,
+      "extend_duration",
+      [
+        nativeToScVal(scheduleId, { type: "u64" }),
+        nativeToScVal(additionalSeconds, { type: "u64" }),
+      ],
+      signer
+    );
+  }
+
+  subscribeToSchedule(
+    id: number,
+    callback: (schedule: ScheduleData, claimable: bigint) => void | Promise<void>,
+    options: {
+      intervalMs?: number;
+      publicKey?: string;
+      onError?: (err: unknown) => void;
+    } = {}
+  ): { unsubscribe: () => void } {
+    const { intervalMs = 10_000, publicKey, onError = console.error } = options;
+
+    let active = true;
+
+    const poll = async () => {
+      if (!active) return;
+      try {
+        const schedule = await this.getSchedule(id, publicKey);
+        if (!active || schedule === null) return;
+        const claimable = await this.getClaimable(id, publicKey);
+        if (!active) return;
+        try {
+          await callback(schedule, claimable);
+        } catch {
+          // Swallow callback errors — the caller's UI should not kill the poller.
+        }
+      } catch (err) {
+        onError(err);
+      }
+    };
+
+    // Fire immediately, then on each interval tick.
+    void poll();
+    const timerId = setInterval(() => void poll(), intervalMs);
+
+    return {
+      unsubscribe: () => {
+        active = false;
+        clearInterval(timerId);
+      },
+    };
   }
 }

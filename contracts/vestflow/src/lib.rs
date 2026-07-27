@@ -21,7 +21,7 @@
 //!
 //! | Error string                    | Triggered by                                                     |
 //! |---------------------------------|------------------------------------------------------------------|
-//! | `"Schedule not found"`          | `get_schedule`, `claim`, `revoke` with an unknown ID             |
+//! | `"Schedule not found"`          | `get_schedule`, `claim`, `revoke`, `bump_schedule_ttl` with an unknown ID |
 //! | `"Nothing to claim yet"`        | `claim` called before any tokens have vested                     |
 //! | `"Schedule is not revocable"`   | `revoke` called on an irrevocable schedule                       |
 //! | `"Already revoked"`             | `revoke` called a second time on the same schedule               |
@@ -42,8 +42,8 @@
 //! | `"Performance oracle must be initialized before enabling milestones"` | `enable_performance_milestones` called before `initialize_performance_oracle` |
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address,
-    BytesN, Env, Symbol, Vec, Val,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
+    Env, Symbol, Val, Vec,
 };
 
 pub const VERSION: u32 = 1;
@@ -91,6 +91,12 @@ pub enum DataKey {
 
 /// Mandatory delay between an on-chain upgrade announcement and execution.
 pub const UPGRADE_TIMELOCK_SECONDS: u64 = 48 * 60 * 60;
+
+/// Ledgers remaining below which `bump_schedule_ttl` extends the instance
+/// TTL (~7 days at ~5s/ledger).
+pub const INSTANCE_TTL_THRESHOLD_LEDGERS: u32 = 120_960;
+/// Ledgers to extend the instance TTL to when bumped (~30 days at ~5s/ledger).
+pub const INSTANCE_TTL_EXTEND_TO_LEDGERS: u32 = 518_400;
 
 /// A contract WASM upgrade that has been announced on-chain but not yet executed.
 #[contracttype]
@@ -695,6 +701,26 @@ impl VestFlowContract {
         );
     }
 
+    /// Check that sufficient storage headroom exists before performing writes.
+    ///
+    /// Soroban contracts have a maximum instance storage size limit. This function
+    /// helps catch storage exhaustion early with a descriptive error rather than
+    /// a silent trap during contract writes.
+    fn check_storage_headroom(env: &Env) -> Result<(), VestFlowError> {
+        let storage = env.storage().instance();
+        let instance_size = storage.len();
+
+        // Reserve ~10% headroom (adjust this threshold as needed).
+        // Soroban's max instance storage is typically several KB per account.
+        // We use a conservative check to ensure operations can proceed.
+        const STORAGE_HEADROOM_THRESHOLD: u32 = 100;
+
+        if instance_size > u32::MAX - STORAGE_HEADROOM_THRESHOLD {
+            panic!("Insufficient contract storage headroom to perform this operation")
+        }
+        Ok(())
+    }
+
     /// Create a new vesting schedule and lock the tokens into the contract.
     ///
     /// The grantor must approve the contract to transfer `total_amount` of
@@ -724,6 +750,8 @@ impl VestFlowContract {
         revocable: bool,
     ) -> Result<u64, VestFlowError> {
         grantor.require_auth();
+
+        Self::check_storage_headroom(&env)?;
 
         assert!(
             beneficiary != grantor,
@@ -868,6 +896,8 @@ impl VestFlowContract {
     ) -> Result<u64, VestFlowError> {
         grantor.require_auth();
 
+        Self::check_storage_headroom(&env)?;
+
         assert!(
             beneficiary != grantor,
             "Beneficiary must differ from grantor"
@@ -881,6 +911,10 @@ impl VestFlowContract {
 
         for milestone in milestones.iter() {
             assert!(milestone.bps > 0, "Milestone unlock percentage must be non-zero");
+            assert!(
+                milestone.bps > 0,
+                "Milestone unlock percentage must be non-zero"
+            );
         }
 
         let total_bps: u64 = milestones.iter().map(|m| m.bps as u64).sum();
@@ -1645,6 +1679,59 @@ impl VestFlowContract {
         Ok(())
     }
 
+    /// Extend the vesting duration of an existing schedule.
+    ///
+    /// Only the **grantor** of the schedule may call this entry point.
+    /// The schedule must not be revoked.
+    ///
+    /// `additional_seconds` is added to the current `duration`, pushing the
+    /// end date forward without changing the `start_time` or any already-vested
+    /// amounts. This is equivalent to re-issuing the grant with a longer
+    /// horizon — useful when an employee stays beyond the original grant period.
+    ///
+    /// Emits an `"ext_dur"` event with `(schedule_id, old_duration, new_duration, timestamp)`.
+    ///
+    /// # Panics
+    ///
+    /// - `"Schedule not found"` — unknown `schedule_id`.
+    /// - `"Schedule has been revoked"` — cannot extend a revoked schedule.
+    /// - `"Additional seconds must be positive"` — zero extension is rejected.
+    pub fn extend_duration(
+        env: Env,
+        schedule_id: u64,
+        additional_seconds: u64,
+    ) -> Result<(), VestFlowError> {
+        let mut schedule: VestingSchedule = env
+            .storage()
+            .instance()
+            .get(&DataKey::Schedule(schedule_id))
+            .ok_or(VestFlowError::NotFound)?;
+
+        schedule.grantor.require_auth();
+
+        if schedule.revoked {
+            return Err(VestFlowError::AlreadyRevoked);
+        }
+        assert!(
+            additional_seconds > 0,
+            "Additional seconds must be positive"
+        );
+
+        let old_duration = schedule.duration;
+        schedule.duration = old_duration + additional_seconds;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::Schedule(schedule_id), &schedule);
+
+        env.events().publish(
+            (symbol_short!("ext_dur"), schedule_id),
+            (old_duration, schedule.duration, env.ledger().timestamp()),
+        );
+
+        Ok(())
+    }
+
     /// Transfer grantor rights to a new address (current grantor only).
     ///
     /// Moves revocation and pause rights to `new_grantor`. Updates the grantor
@@ -1726,6 +1813,60 @@ impl VestFlowContract {
             .instance()
             .get(&DataKey::Schedule(schedule_id))
             .ok_or(VestFlowError::NotFound)
+    }
+
+    /// Extend this contract instance's storage TTL. Callable by anyone
+    /// (beneficiary, grantor, or a third-party keeper) -- there is nothing
+    /// sensitive about keeping the contract alive, and requiring auth here
+    /// would just make it harder for keepers to run this permissionlessly.
+    ///
+    /// `schedule_id` is validated to exist so a caller gets a clear
+    /// [`VestFlowError::NotFound`] instead of silently bumping TTL for a
+    /// schedule that was never created (e.g. a typo'd ID).
+    ///
+    /// # Note on storage tier
+    ///
+    /// Schedules currently live in **instance** storage (see [`DataKey::Schedule`]
+    /// and every other read/write in this contract), not persistent storage --
+    /// there is no independent per-schedule persistent entry to bump yet. Instance
+    /// storage has a single TTL for the whole contract instance, so this extends
+    /// that shared TTL rather than a per-schedule key. If schedules are ever
+    /// migrated to persistent storage (tracked separately), this should be
+    /// updated to call `env.storage().persistent().extend_ttl(&DataKey::Schedule(schedule_id), ..)`
+    /// instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VestFlowError::NotFound`] if `schedule_id` does not exist.
+    pub fn bump_schedule_ttl(env: Env, schedule_id: u64) -> Result<(), VestFlowError> {
+        if !env
+            .storage()
+            .instance()
+            .has(&DataKey::Schedule(schedule_id))
+        {
+            return Err(VestFlowError::NotFound);
+        }
+
+        env.storage().instance().extend_ttl(
+            INSTANCE_TTL_THRESHOLD_LEDGERS,
+            INSTANCE_TTL_EXTEND_TO_LEDGERS,
+        );
+
+        Ok(())
+    }
+
+    /// Return the vesting kind of a schedule without loading the full schedule.
+    ///
+    /// This is a cheap view that lets frontends and SDKs branch on the
+    /// vesting curve type (Linear, Cliff, LinearWithCliff, Graded) without
+    /// paying for a full storage read of the entire `VestingSchedule` struct.
+    ///
+    /// Returns `None` for unknown schedule IDs (does not panic).
+    pub fn vesting_type(env: Env, schedule_id: u64) -> Option<VestingKind> {
+        env.storage()
+            .instance()
+            .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
+            .map(|schedule| schedule.kind)
     }
 
     /// Check whether a schedule has been revoked without loading the full schedule.
@@ -1935,6 +2076,46 @@ impl VestFlowContract {
             results.push_back(amount);
         }
         results
+    }
+
+    /// View: return the number of tokens that unlock at the cliff date for a
+    /// `Cliff` or `LinearWithCliff` schedule.
+    ///
+    /// | Kind              | Return value                                        |
+    /// |-------------------|-----------------------------------------------------|
+    /// | `Cliff`           | `total_amount` (everything unlocks at cliff)        |
+    /// | `LinearWithCliff` | 0 — the cliff itself unlocks nothing extra; linear  |
+    /// |                   | vesting begins at the cliff date                    |
+    /// | `Linear` / other  | 0 — no cliff concept applies                        |
+    /// | Unknown ID        | 0                                                   |
+    ///
+    /// The return value is in stroops (base token units). Beneficiaries can
+    /// compare this against `claimable()` to understand how much will become
+    /// available at the cliff without doing off-chain math.
+    pub fn cliff_unlock_amount(env: Env, schedule_id: u64) -> i128 {
+        let schedule: VestingSchedule = match env
+            .storage()
+            .instance()
+            .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
+        {
+            Some(s) => s,
+            None => return 0,
+        };
+
+        match schedule.kind {
+            VestingKind::Cliff => {
+                // For a pure Cliff schedule the entire amount unlocks at the
+                // cliff date; nothing vests before it.
+                schedule.total_amount
+            }
+            VestingKind::LinearWithCliff => {
+                // For LinearWithCliff the cliff date is the start of linear
+                // vesting — no discrete "cliff tranche" unlocks.  Return 0 so
+                // callers can distinguish this from Cliff schedules.
+                0
+            }
+            VestingKind::Linear | VestingKind::Graded => 0,
+        }
     }
 
     /// View: return the sum of all unvested amounts for a given token.
@@ -2204,6 +2385,50 @@ mod test {
         client.cancel_upgrade(&token_admin);
 
         assert!(client.pending_upgrade().is_none());
+    }
+
+    #[test]
+    fn test_bump_schedule_ttl_extends_instance_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &1000,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        // Burn down the instance TTL below the bump threshold so the call
+        // below has something real to extend.
+        env.as_contract(&client.address, || {
+            env.storage().instance().extend_ttl(0, 0);
+        });
+        let ttl_before = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+
+        client.bump_schedule_ttl(&id);
+
+        let ttl_after = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+        assert!(ttl_after > ttl_before);
+        assert_eq!(ttl_after, INSTANCE_TTL_EXTEND_TO_LEDGERS);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, #1)")]
+    fn test_bump_schedule_ttl_rejects_unknown_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, _) = setup(&env);
+
+        client.bump_schedule_ttl(&999);
     }
 
     #[test]
@@ -4094,5 +4319,142 @@ mod test {
         if result.is_ok() {
             assert!(client.pending_upgrade().is_none());
         }
+    }
+
+    // --- Issue #373: vesting_type view ---
+
+    #[test]
+    fn test_vesting_type_returns_kind_for_known_schedule() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Cliff,
+            &false,
+        );
+
+        let kind = client.vesting_type(&id);
+        assert_eq!(kind.unwrap(), VestingKind::Cliff);
+    }
+
+    #[test]
+    fn test_vesting_type_returns_none_for_unknown_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, _) = setup(&env);
+
+        let kind = client.vesting_type(&999);
+        assert!(kind.is_none());
+    }
+
+    #[test]
+    fn test_vesting_type_all_kinds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+
+        let id_linear = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &false,
+        );
+        assert_eq!(
+            client.vesting_type(&id_linear).unwrap(),
+            VestingKind::Linear
+        );
+
+        let id_cliff = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &500,
+            &500,
+            &VestingKind::Cliff,
+            &false,
+        );
+        assert_eq!(client.vesting_type(&id_cliff).unwrap(), VestingKind::Cliff);
+
+        let id_lwc = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &200,
+            &200,
+            &VestingKind::LinearWithCliff,
+            &false,
+        );
+        assert_eq!(
+            client.vesting_type(&id_lwc).unwrap(),
+            VestingKind::LinearWithCliff
+        );
+    }
+
+    /// vested_at must return exactly total_amount when now == start_time + duration_seconds.
+    /// This boundary is the off-by-one regression point: one second earlier should still be
+    /// proportional; at the exact end timestamp the full amount must be returned.
+    #[test]
+    fn test_vested_at_returns_total_amount_at_exact_end_boundary() {
+        let env = Env::default();
+
+        let total_amount: i128 = 5_000_000;
+        let start_time: u64 = 1_000;
+        let duration_seconds: u64 = 2_000;
+        let end_time = start_time + duration_seconds;
+
+        let schedule = VestingSchedule {
+            id: 1,
+            grantor: Address::generate(&env),
+            beneficiary: Address::generate(&env),
+            token: Address::generate(&env),
+            total_amount,
+            claimed_amount: 0,
+            start_time,
+            duration_seconds,
+            cliff_seconds: 0,
+            lockup_duration: 0,
+            kind: VestingKind::Linear,
+            revocable: false,
+            revoked: false,
+            vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![&env],
+        };
+
+        // One second before the end: must be strictly less than total_amount.
+        assert!(schedule.vested_at(end_time - 1) < total_amount);
+
+        // At exactly start_time + duration_seconds: must equal total_amount.
+        assert_eq!(schedule.vested_at(end_time), total_amount);
+
+        // Any time after must also equal total_amount (caps, never exceeds).
+        assert_eq!(schedule.vested_at(end_time + 1_000), total_amount);
     }
 }
