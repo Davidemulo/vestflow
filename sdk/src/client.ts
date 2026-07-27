@@ -406,6 +406,40 @@ export class VestflowClient {
   }
 
   /**
+   * Return the unvested remainder for a schedule — the amount a grantor would
+   * recover by revoking right now.
+   *
+   * The contract has no standalone `remaining_unvested` view, so this composes
+   * `total_amount` (from `get_schedule`) with the `vested_amount_current` view,
+   * mirroring the exact calculation `revoke()` uses on-chain (`total_amount - vested`).
+   *
+   * Returns 0n if the schedule does not exist.
+   */
+  async getRemainingUnvested(scheduleId: number, publicKey?: string): Promise<bigint> {
+    const schedule = await this.getSchedule(scheduleId, publicKey);
+    if (schedule === null) return 0n;
+    const vested = await this.getVestedAmountCurrent(scheduleId, publicKey);
+    const remaining = schedule.total_amount - vested;
+    return remaining > 0n ? remaining : 0n;
+  }
+
+  /**
+   * Return how many tokens are vested for a schedule using the current ledger time.
+   */
+  async getVestedAmountCurrent(id: number, publicKey?: string): Promise<bigint> {
+    try {
+      const val = await this.simulate(
+        "vested_amount_current",
+        [nativeToScVal(id, { type: "u64" })],
+        publicKey
+      );
+      return BigInt(scValToNative(val));
+    } catch {
+      return 0n;
+    }
+  }
+
+  /**
    * Preview how many tokens will be claimable at an arbitrary future timestamp.
    *
    * The result reflects current schedule state projected to `ts` — most
