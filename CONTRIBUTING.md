@@ -48,8 +48,19 @@ stellar contract deploy \
 ## Code style
 
 - Rust: follow standard `rustfmt` formatting (`cargo fmt`).
-- TypeScript: no explicit linter configured — match the surrounding style.
+- TypeScript: linted with ESLint (`npm run lint`), enforced in CI.
 - Comments: only when the *why* is non-obvious.
+
+## Reviewing Dependabot security PRs
+
+Contributors who triage or review a Dependabot security-alert PR should check:
+
+- [ ] **Changelog / release notes** — read the changelog between the old and new version for the affected package. Confirm the fix actually addresses the advisory, not an unrelated release.
+- [ ] **Breaking changes** — check for a major version bump or any noted breaking API changes. If the bump crosses a major version, verify the codebase doesn't use any removed/changed APIs.
+- [ ] **License compatibility** — confirm the new version's license hasn't changed in a way that's incompatible with this project's MIT license.
+- [ ] **Transitive scope** — check whether the update also pulls in changes to transitive dependencies (visible in the lockfile diff) beyond the flagged package.
+- [ ] **CI is green** — do not merge on the advisory's urgency alone; let `npm ci && npm run build && npm test` (and `cargo test` for contract-adjacent updates) run and pass first.
+- [ ] **Advisory severity vs. actual exposure** — a "critical" advisory in a devDependency or a code path this project doesn't use is lower real risk than the CVSS score alone suggests; note this in the PR review if relevant.
 
 ## Reporting security issues
 
