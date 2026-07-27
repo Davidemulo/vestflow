@@ -1,5 +1,9 @@
 import { getClaimable } from "@/lib/stellar";
+import { getOrSetCache } from "@/lib/redisCache";
 import { NextRequest, NextResponse } from "next/server";
+
+// Short TTL read-through cache (#206) — see app/api/schedules/[id]/route.ts.
+const CACHE_TTL_SECONDS = 20;
 
 export async function GET(
   request: NextRequest,
@@ -16,7 +20,11 @@ export async function GET(
       );
     }
 
-    const claimable = await getClaimable(scheduleId);
+    const claimable = await getOrSetCache(
+      `claimable:${scheduleId}`,
+      CACHE_TTL_SECONDS,
+      () => getClaimable(scheduleId),
+    );
 
     return NextResponse.json(
       {
