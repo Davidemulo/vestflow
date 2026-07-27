@@ -152,3 +152,14 @@ CREATE INDEX IF NOT EXISTS idx_push_endpoint ON web_push_subscriptions (endpoint
 CREATE INDEX IF NOT EXISTS idx_push_schedule ON web_push_subscriptions (schedule_id);
 CREATE INDEX IF NOT EXISTS idx_push_beneficiary ON web_push_subscriptions (beneficiary_address);
 CREATE INDEX IF NOT EXISTS idx_push_active ON web_push_subscriptions (is_active);
+
+-- Auth nonces — short-lived challenges issued to wallets before signing,
+-- consumed by /api/auth/verify to prevent replay.
+CREATE TABLE IF NOT EXISTS nonces (
+  nonce       TEXT PRIMARY KEY,
+  public_key  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,     -- ISO 8601
+  created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_nonces_public_key ON nonces (public_key);
