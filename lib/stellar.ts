@@ -526,3 +526,57 @@ export function parseContractError(e: Error): string {
   if (msg.includes("Start time in the past")) return "The start time must be in the future.";
   return msg;
 }
+
+// ── Transaction polling helpers ──────────────────────────────────────────
+
+export interface TransactionStatusResult {
+  status: string;
+  hash?: string;
+  ledger?: number;
+  error?: string;
+}
+
+/**
+ * Fetch the current status of a transaction from the RPC server.
+ */
+export async function getTransactionStatus(
+  hash: string
+): Promise<TransactionStatusResult> {
+  const result = await server.getTransaction(hash);
+  return {
+    status: result.status,
+    hash: (result as any).hash,
+    ledger: (result as any).latestLedger,
+    error: (result as any).error,
+  };
+}
+
+/**
+ * Poll for a transaction to reach a terminal status (SUCCESS, FAILED, ERROR).
+ * Rejects if the timeout elapses while the status is still NOT_FOUND.
+ */
+export async function waitForTransaction(
+  hash: string,
+  opts: { timeoutMs?: number; intervalMs?: number } = {}
+): Promise<TransactionStatusResult> {
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const intervalMs = opts.intervalMs ?? 1_000;
+  const deadline = Date.now() + timeoutMs;
+
+  let status = await getTransactionStatus(hash);
+  while (status.status === "NOT_FOUND") {
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Timed out waiting for transaction ${hash} to confirm after ${timeoutMs}ms`
+      );
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+    status = await getTransactionStatus(hash);
+  }
+
+  if (status.status === "FAILED" || status.status === "ERROR") {
+    throw new Error(`Transaction ${hash} ${status.status.toLowerCase()}: ${status.error ?? "unknown"}`);
+  }
+
+  return status;
+}
