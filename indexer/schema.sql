@@ -134,3 +134,21 @@ CREATE TABLE IF NOT EXISTS beneficiary_schedules (
 );
 
 CREATE INDEX IF NOT EXISTS idx_beneficiary_schedules_beneficiary ON beneficiary_schedules (beneficiary);
+
+-- Web Push subscriptions
+CREATE TABLE IF NOT EXISTS web_push_subscriptions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  endpoint TEXT NOT NULL UNIQUE,
+  p256dh TEXT NOT NULL,
+  auth TEXT NOT NULL,
+  schedule_id INTEGER NOT NULL,
+  beneficiary_address TEXT NOT NULL,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_push_endpoint ON web_push_subscriptions (endpoint);
+CREATE INDEX IF NOT EXISTS idx_push_schedule ON web_push_subscriptions (schedule_id);
+CREATE INDEX IF NOT EXISTS idx_push_beneficiary ON web_push_subscriptions (beneficiary_address);
+CREATE INDEX IF NOT EXISTS idx_push_active ON web_push_subscriptions (is_active);

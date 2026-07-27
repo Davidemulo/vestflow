@@ -29,6 +29,7 @@ import { buildCombinedExportCSV, downloadCSV } from "@/lib/csvExport";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type StatusFilter = "all" | "active" | "completed" | "revoked";
+type KindFilter = "all" | "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
 type SortKey = "newest" | "ending-soon" | "largest-amount" | "status";
 const PAGE_SIZE = 10;
 
@@ -159,6 +160,7 @@ export default function DashboardPage() {
   const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [tokenFilter, setTokenFilter] = useState<string>("all");
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   const [startDateFilter, setStartDateFilter] = useState<string>("");
   const [endDateFilter, setEndDateFilter] = useState<string>("");
   const [sortBy, setSortBy] = useState<SortKey>("newest");
@@ -267,6 +269,11 @@ export default function DashboardPage() {
       filtered = filtered.filter(s => s.token === tokenFilter);
     }
 
+    // Vesting kind filter
+    if (kindFilter !== "all") {
+      filtered = filtered.filter(s => s.kind === kindFilter);
+    }
+
     // Date range filters
     if (startDateFilter) {
       const startTimestamp = new Date(startDateFilter).getTime() / 1000;
@@ -278,7 +285,7 @@ export default function DashboardPage() {
     }
 
     return filtered;
-  }, [roleFiltered, statusFilter, tokenFilter, startDateFilter, endDateFilter]);
+  }, [roleFiltered, statusFilter, tokenFilter, kindFilter, startDateFilter, endDateFilter]);
 
   // Apply sort on top of the multi-filtered list
   const sortedSchedules = useMemo(() => {
@@ -317,7 +324,7 @@ export default function DashboardPage() {
   }, [sortedSchedules, q, getLabel]);
 
   // Reset to page 1 whenever the filtered set changes
-  useEffect(() => { setPage(1); }, [searchFiltered.length, roleFilter, statusFilter, tokenFilter, startDateFilter, endDateFilter, sortBy]);
+  useEffect(() => { setPage(1); }, [searchFiltered.length, roleFilter, statusFilter, tokenFilter, kindFilter, startDateFilter, endDateFilter, sortBy]);
 
   const totalPages = Math.max(1, Math.ceil(searchFiltered.length / PAGE_SIZE));
   const pageStart = (page - 1) * PAGE_SIZE;
@@ -332,12 +339,13 @@ export default function DashboardPage() {
   const clearAllFilters = () => {
     setStatusFilter("all");
     setTokenFilter("all");
+    setKindFilter("all");
     setStartDateFilter("");
     setEndDateFilter("");
     setQuery("");
   };
 
-  const hasActiveFilters = statusFilter !== "all" || tokenFilter !== "all" || startDateFilter || endDateFilter || query;
+  const hasActiveFilters = statusFilter !== "all" || tokenFilter !== "all" || kindFilter !== "all" || startDateFilter || endDateFilter || query;
 
   return (
     <>
@@ -414,7 +422,7 @@ export default function DashboardPage() {
               )}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
               {/* Status filter */}
               <div>
                 <label htmlFor="status-filter" className="block text-xs text-zinc-500 mb-1.5">
@@ -430,6 +438,25 @@ export default function DashboardPage() {
                   <option value="active">Active</option>
                   <option value="completed">Completed</option>
                   <option value="revoked">Revoked</option>
+                </select>
+              </div>
+
+              {/* Vesting kind filter */}
+              <div>
+                <label htmlFor="kind-filter" className="block text-xs text-zinc-500 mb-1.5">
+                  Vesting Kind
+                </label>
+                <select
+                  id="kind-filter"
+                  value={kindFilter}
+                  onChange={e => setKindFilter(e.target.value as KindFilter)}
+                  className="w-full text-xs bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-zinc-300 outline-none focus:border-violet-500/50 transition-colors"
+                >
+                  <option value="all">All kinds</option>
+                  <option value="Linear">Linear</option>
+                  <option value="Cliff">Cliff</option>
+                  <option value="LinearWithCliff">Linear with Cliff</option>
+                  <option value="Graded">Graded</option>
                 </select>
               </div>
 
