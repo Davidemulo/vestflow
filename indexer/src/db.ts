@@ -611,3 +611,29 @@ export function markMilestoneProcessed(scheduleId: number, milestoneType: string
     )
     .run(scheduleId, milestoneType);
 }
+
+// ── Beneficiary Index ─────────────────────────────────────────────────────
+
+/**
+ * Insert a beneficiary-schedule mapping into the index table.
+ * Called when a schedule_created event is processed.
+ */
+export function insertBeneficiarySchedule(beneficiary: string, scheduleId: number, network?: NetworkName): void {
+  getDb(network)
+    .prepare(
+      `INSERT OR IGNORE INTO beneficiary_schedules (beneficiary, schedule_id)
+       VALUES (?, ?)`
+    )
+    .run(beneficiary, scheduleId);
+}
+
+/**
+ * Get all schedule IDs for a beneficiary address using the index.
+ * Provides O(1) lookup by leveraging the beneficiary_schedules table.
+ */
+export function getScheduleIdsByBeneficiary(beneficiary: string, network?: NetworkName): number[] {
+  const rows = getDb(network)
+    .prepare("SELECT schedule_id FROM beneficiary_schedules WHERE beneficiary = ? ORDER BY created_at DESC")
+    .all(beneficiary) as { schedule_id: number }[];
+  return rows.map(r => r.schedule_id);
+}
