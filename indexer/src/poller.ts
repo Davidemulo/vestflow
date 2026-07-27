@@ -15,7 +15,7 @@
  */
 
 import { rpc as StellarRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
-import { getCheckpoint, setCheckpoint, insertEvent, computeTvlStats } from "./db";
+import { getCheckpoint, setCheckpoint, insertEvent, computeTvlStats, insertBeneficiarySchedule } from "./db";
 import { getNetworkConfig, parseNetwork } from "./config";
 import type { EventType } from "./types";
 
@@ -176,7 +176,13 @@ async function poll(): Promise<void> {
           raw_value: jsonStringify(value),
         }, NETWORK);
 
-        if (isNew) ingested++;
+        if (isNew) {
+          ingested++;
+          // Populate beneficiary index for O(1) lookup
+          if (eventType === "schedule_created" && beneficiary && scheduleId !== null) {
+            insertBeneficiarySchedule(beneficiary, scheduleId, NETWORK);
+          }
+        }
         if (raw.ledger > highestLedger) highestLedger = raw.ledger;
       }
 
