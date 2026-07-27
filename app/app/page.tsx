@@ -17,6 +17,7 @@ import {
   ScheduleData,
   vestingProgress,
   NATIVE_TOKEN,
+  stroopsToXlm,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useCountUp } from "@/hooks/useCountUp";
@@ -78,7 +79,7 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
     return () => cancelAnimationFrame(id);
   }, []);
 
-  const toXlm = (v: bigint) => Number(v) / 10_000_000;
+  const toXlm = (v: bigint) => parseFloat(stroopsToXlm(v));
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
@@ -122,6 +123,31 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
   );
 }
 
+function RpcErrorBanner({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-3 mb-6 px-4 py-3 rounded-xl border border-red-500/30 bg-red-500/10 text-red-300 text-sm"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 shrink-0" aria-hidden="true">
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+      <span className="flex-1">
+        Could not reach the Stellar RPC — check your connection and refresh.
+      </span>
+      <button
+        onClick={onDismiss}
+        aria-label="Dismiss error banner"
+        className="text-red-400 hover:text-red-200 transition-colors ml-2 leading-none"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const { publicKey } = useWallet();
   const { getLabel } = useAddressBook();
@@ -129,6 +155,7 @@ export default function DashboardPage() {
   const [schedules, setSchedules] = useState<ScheduleData[]>([]);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
+  const [rpcError, setRpcError] = useState(false);
   const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [tokenFilter, setTokenFilter] = useState<string>("all");
@@ -140,6 +167,7 @@ export default function DashboardPage() {
 
   const load = async () => {
     setLoading(true);
+    setRpcError(false);
     try {
       const all = await getAllSchedules(publicKey ?? undefined);
       if (publicKey) {
@@ -184,7 +212,16 @@ export default function DashboardPage() {
         setSchedules(all.slice(0, 6));
         setStats(null);
       }
-    } finally { setLoading(false); }
+    } catch (err) {
+      const isNetworkError =
+        err instanceof TypeError ||
+        (err instanceof Error && /fetch|network|rpc|connect|econnrefused|timeout/i.test(err.message));
+      if (isNetworkError) {
+        setRpcError(true);
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { load(); }, [publicKey]);
@@ -306,6 +343,9 @@ export default function DashboardPage() {
     <>
       <Navbar />
       <main className="max-w-5xl mx-auto px-4 sm:px-6 pt-24 sm:pt-28 pb-20">
+        {/* RPC offline banner (#278) */}
+        {rpcError && <RpcErrorBanner onDismiss={() => setRpcError(false)} />}
+
         {/* Header row */}
         <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
           <div>
