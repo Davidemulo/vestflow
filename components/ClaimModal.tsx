@@ -207,10 +207,19 @@ export default function ClaimModal({
               onClick={handleClaim}
               disabled={loading}
               className="flex-1 btn-primary rounded-xl py-2.5 font-semibold text-white text-sm disabled:opacity-60"
+              aria-busy={loading}
             >
-              {loading
-                ? "Confirming…"
-                : `Claim ${stroopsToXlm(displayAmt)} ${tokenSymbol}`}
+              {loading ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span
+                    className="inline-block w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"
+                    aria-hidden="true"
+                  />
+                  Confirming…
+                </span>
+              ) : (
+                `Claim ${stroopsToXlm(displayAmt)} ${tokenSymbol}`
+              )}
             </button>
           )}
         </div>

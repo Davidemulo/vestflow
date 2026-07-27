@@ -13,9 +13,13 @@ export {
   vestingProgress,
   formatDate,
   parseContractError,
+  formatSchedule,
 } from "./utils";
+export type { ScheduleSummary } from "./utils";
+export { isScheduleRevoked } from "./types";
 export type {
   ScheduleData,
+  RevokedSchedule,
   VestflowConfig,
   CreateScheduleParams,
   CreateGradedScheduleParams,

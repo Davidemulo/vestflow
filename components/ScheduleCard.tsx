@@ -57,17 +57,28 @@ export default function ScheduleCard({
   const isNative = schedule.token === NATIVE_TOKEN;
   const tokenSymbol = isNative ? "XLM" : `Token (${truncate(schedule.token, 4, 4)})`;
 
+  const vestingEndTime = schedule.start_time + schedule.duration;
+  const isFullyVested = progress >= 100;
+
   const statusColor = schedule.revoked
     ? "bg-red-500/10 text-red-400"
-    : progress >= 100
+    : isFullyVested
     ? "bg-green-500/10 text-green-400"
     : "bg-violet-500/10 text-violet-400";
 
   const statusLabel = schedule.revoked
     ? "Revoked"
-    : progress >= 100
+    : isFullyVested
     ? "Fully Vested"
     : "Vesting";
+
+  const KIND_BADGE: Record<string, string> = {
+    Linear:          "bg-blue-500/10 text-blue-400 border border-blue-500/20",
+    Cliff:           "bg-amber-500/10 text-amber-400 border border-amber-500/20",
+    LinearWithCliff: "bg-cyan-500/10 text-cyan-400 border border-cyan-500/20",
+    Graded:          "bg-purple-500/10 text-purple-400 border border-purple-500/20",
+  };
+  const kindStyle = KIND_BADGE[schedule.kind] ?? "bg-zinc-500/10 text-zinc-400 border border-zinc-500/20";
 
   return (
     <div className="card p-5 flex flex-col gap-3">
@@ -80,7 +91,21 @@ export default function ScheduleCard({
             </Link>
             <CopyButton value={String(schedule.id)} label={`Copy schedule ${schedule.id}`} />
           </div>
-          <p className="text-xs text-zinc-500 mt-0.5">{schedule.kind} vesting{schedule.revocable ? " · revocable" : ""}</p>
+          <div className="flex items-center gap-1.5 mt-0.5 flex-wrap">
+            <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${kindStyle}`}>
+              {schedule.kind}
+            </span>
+            {schedule.revocable && (
+              <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400 border border-zinc-700/60">
+                revocable
+              </span>
+            )}
+            {isFullyVested && !schedule.revoked && (
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20">
+                ✓ {formatDate(vestingEndTime)}
+              </span>
+            )}
+          </div>
         </div>
         <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusColor}`}>
           {statusLabel}

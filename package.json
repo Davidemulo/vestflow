@@ -9,19 +9,23 @@
     "contracts:metrics": "bash scripts/contract-metrics.sh",
     "bindings:generate": "bash scripts/generate-bindings.sh",
     "bindings:build": "npm --prefix lib/bindings/vestflow install && npm --prefix lib/bindings/vestflow run build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "doctor": "node scripts/doctor.js"
   },
   "dependencies": {
     "@stellar/freighter-api": "^6.0.1",
     "@stellar/stellar-sdk": "^15.1.0",
     "better-sqlite3": "^12.11.1",
     "express-rate-limit": "^7.1.5",
+    "ioredis": "^5.11.1",
     "next": "16.2.6",
     "qrcode.react": "^4.2.0",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
     "@tailwindcss/postcss": "^4",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -31,6 +35,8 @@
     "@types/node": "^20",
     "@types/react": "^19.2.16",
     "@types/react-dom": "^19.2.3",
+    "@types/web-push": "^3.6.4",
+    "autocannon": "^8.0.0",
     "jsdom": "^29.1.1",
     "lefthook": "^2.1.9",
     "tailwindcss": "^4",

@@ -119,3 +119,98 @@ export function parseContractError(e: Error): string {
     return "The cliff period cannot be longer than the total vesting duration.";
   return msg;
 }
+
+// ---------------------------------------------------------------------------
+// formatSchedule (#447)
+// ---------------------------------------------------------------------------
+
+/**
+ * Human-readable summary of a vesting schedule.
+ *
+ * All stroop values are converted to XLM strings; all timestamps are
+ * converted to locale date strings so consuming components do not repeat
+ * the same conversion logic.
+ */
+export interface ScheduleSummary {
+  /** Schedule ID as a string for display. */
+  id: string;
+  /** Abbreviated grantor address. */
+  grantor: string;
+  /** Abbreviated beneficiary address. */
+  beneficiary: string;
+  /** Total vesting amount in XLM (e.g. "1,000.0000"). */
+  totalAmountXlm: string;
+  /** Already-claimed amount in XLM. */
+  claimedXlm: string;
+  /** Remaining (unclaimed) amount in XLM. */
+  remainingXlm: string;
+  /** Vesting start date (locale string). */
+  startDate: string;
+  /** Vesting end date (locale string). */
+  endDate: string;
+  /** Cliff date, or null when no cliff applies. */
+  cliffDate: string | null;
+  /** Vesting curve label. */
+  kind: string;
+  /** "Active" | "Revoked" | "Paused" | "Completed" */
+  status: string;
+  /** Percentage of total duration elapsed (0–100). */
+  progressPct: number;
+}
+
+/**
+ * Return a human-readable summary object for a vesting schedule.
+ *
+ * Centralises stroops → XLM conversion and timestamp → date formatting
+ * so downstream apps don't repeat the same transformation logic.
+ *
+ * @param s   - A `ScheduleData` object returned from `VestflowClient.getSchedule`.
+ * @param now - Current Unix timestamp in seconds (defaults to `Date.now() / 1000`).
+ *
+ * @example
+ * const summary = formatSchedule(schedule);
+ * console.log(summary.totalAmountXlm); // "1,000.0000"
+ * console.log(summary.status);         // "Active"
+ */
+export function formatSchedule(
+  s: ScheduleData,
+  now: number = Math.floor(Date.now() / 1000)
+): ScheduleSummary {
+  const endTime = s.start_time + s.duration;
+  const cliffTime =
+    s.cliff_duration > 0 ? s.start_time + s.cliff_duration : null;
+
+  let status: string;
+  if (s.revoked) {
+    status = "Revoked";
+  } else if (s.paused) {
+    status = "Paused";
+  } else if (now >= endTime) {
+    status = "Completed";
+  } else {
+    status = "Active";
+  }
+
+  const elapsed = Math.max(0, now - s.start_time);
+  const progressPct =
+    s.duration > 0
+      ? Math.min(100, Math.round((elapsed / s.duration) * 100))
+      : 100;
+
+  const remaining = s.total_amount - s.claimed;
+
+  return {
+    id: String(s.id),
+    grantor: truncate(s.grantor),
+    beneficiary: truncate(s.beneficiary),
+    totalAmountXlm: stroopsToXlm(s.total_amount),
+    claimedXlm: stroopsToXlm(s.claimed),
+    remainingXlm: stroopsToXlm(remaining >= 0n ? remaining : 0n),
+    startDate: formatDate(s.start_time),
+    endDate: formatDate(endTime),
+    cliffDate: cliffTime !== null ? formatDate(cliffTime) : null,
+    kind: s.kind,
+    status,
+    progressPct,
+  };
+}
