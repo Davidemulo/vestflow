@@ -104,6 +104,8 @@ const hash = await client.createSchedule({ ... }, nodeSigner);
 | `getSchedulesByBeneficiary(address)` | `Promise<number[]>` | Schedule IDs by beneficiary |
 | `getClaimable(id, publicKey?)` | `Promise<bigint>` | Claimable amount for one schedule |
 | `getClaimableBulk(ids, publicKey?)` | `Promise<bigint[]>` | Claimable amounts for multiple schedules |
+| `getScheduleBatch(ids, publicKey?)` | `Promise<(ScheduleData \| null)[]>` | Fetch multiple schedules in one call |
+| `getRemainingUnvested(id, publicKey?)` | `Promise<bigint>` | Unvested remainder (what a revoke would recover) |
 | `getAllSchedules(publicKey?)` | `Promise<ScheduleData[]>` | All schedules |
 
 ### Write Methods
