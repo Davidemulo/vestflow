@@ -4185,4 +4185,48 @@ mod test {
             assert!(client.pending_upgrade().is_none());
         }
     }
+
+    /// vested_at must return exactly total_amount when now == start_time + duration_seconds.
+    /// This boundary is the off-by-one regression point: one second earlier should still be
+    /// proportional; at the exact end timestamp the full amount must be returned.
+    #[test]
+    fn test_vested_at_returns_total_amount_at_exact_end_boundary() {
+        let env = Env::default();
+
+        let total_amount: i128 = 5_000_000;
+        let start_time: u64 = 1_000;
+        let duration_seconds: u64 = 2_000;
+        let end_time = start_time + duration_seconds;
+
+        let schedule = VestingSchedule {
+            id: 1,
+            grantor: Address::generate(&env),
+            beneficiary: Address::generate(&env),
+            token: Address::generate(&env),
+            total_amount,
+            claimed_amount: 0,
+            start_time,
+            duration_seconds,
+            cliff_seconds: 0,
+            lockup_duration: 0,
+            kind: VestingKind::Linear,
+            revocable: false,
+            revoked: false,
+            vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![&env],
+        };
+
+        // One second before the end: must be strictly less than total_amount.
+        assert!(schedule.vested_at(end_time - 1) < total_amount);
+
+        // At exactly start_time + duration_seconds: must equal total_amount.
+        assert_eq!(schedule.vested_at(end_time), total_amount);
+
+        // Any time after must also equal total_amount (caps, never exceeds).
+        assert_eq!(schedule.vested_at(end_time + 1_000), total_amount);
+    }
 }
