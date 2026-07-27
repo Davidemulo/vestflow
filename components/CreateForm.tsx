@@ -1,6 +1,7 @@
 "use client";
 import { useState, type FormEvent, type ReactNode } from "react";
 import { useToast } from "@/components/Toast";
+import InfoTooltip from "@/components/InfoTooltip";
 import {
   createSchedule,
   CONTRACT_ID,
@@ -121,19 +122,24 @@ function Field({
   htmlFor,
   error,
   hint,
+  info,
   children,
 }: {
   label: string;
   htmlFor?: string;
   error?: string;
   hint?: string;
+  info?: string;
   children: ReactNode;
 }) {
   return (
     <div className="flex flex-col gap-1.5">
-      <label htmlFor={htmlFor} className="text-sm text-zinc-400">
-        {label}
-      </label>
+      <div className="flex items-center gap-1.5">
+        <label htmlFor={htmlFor} className="text-sm text-zinc-400">
+          {label}
+        </label>
+        {info && <InfoTooltip text={info} />}
+      </div>
       {children}
       {hint && !error && <p className="text-xs text-zinc-500">{hint}</p>}
       {error && (
@@ -368,6 +374,7 @@ export default function CreateForm() {
     setStep("form");
     setTxHash("");
     setErrMsg("");
+    setBalanceError("");
     setSubmitAttempted(false);
     setTouched({});
     setLockupEdited(false);
@@ -696,6 +703,7 @@ export default function CreateForm() {
         htmlFor="durationDays"
         error={visibleErrors.durationDays}
         hint="How many days from start until all tokens are fully vested."
+        info="Token vesting is the process of gradually releasing tokens over time. The total duration is the complete time period during which tokens become available to claim."
       >
         <input
           id="durationDays"
@@ -759,6 +767,7 @@ export default function CreateForm() {
               ? "Tokens unlock all at once after this many days."
               : "No tokens are claimable before this point. Linear vesting begins after the cliff."
           }
+          info="A cliff is a period during which no tokens are claimable at all. After the cliff period ends, tokens become available according to the vesting schedule."
         >
           <input
             id="cliffDays"
@@ -781,6 +790,7 @@ export default function CreateForm() {
         htmlFor="lockupDays"
         error={visibleErrors.lockupDays}
         hint="Tokens vest on schedule but stay non-transferable until the lockup ends. Must be ≥ the cliff; defaults to the cliff value."
+        info="Lockup prevents vested tokens from being transferred until the lockup period ends. This is useful for ensuring tokens remain with the intended recipient during the vesting period."
       >
         <input
           id="lockupDays"

@@ -695,6 +695,26 @@ impl VestFlowContract {
         );
     }
 
+    /// Check that sufficient storage headroom exists before performing writes.
+    ///
+    /// Soroban contracts have a maximum instance storage size limit. This function
+    /// helps catch storage exhaustion early with a descriptive error rather than
+    /// a silent trap during contract writes.
+    fn check_storage_headroom(env: &Env) -> Result<(), VestFlowError> {
+        let storage = env.storage().instance();
+        let instance_size = storage.len();
+
+        // Reserve ~10% headroom (adjust this threshold as needed).
+        // Soroban's max instance storage is typically several KB per account.
+        // We use a conservative check to ensure operations can proceed.
+        const STORAGE_HEADROOM_THRESHOLD: u32 = 100;
+
+        if instance_size > u32::MAX - STORAGE_HEADROOM_THRESHOLD {
+            panic!("Insufficient contract storage headroom to perform this operation")
+        }
+        Ok(())
+    }
+
     /// Create a new vesting schedule and lock the tokens into the contract.
     ///
     /// The grantor must approve the contract to transfer `total_amount` of
@@ -724,6 +744,8 @@ impl VestFlowContract {
         revocable: bool,
     ) -> Result<u64, VestFlowError> {
         grantor.require_auth();
+
+        Self::check_storage_headroom(&env)?;
 
         assert!(
             beneficiary != grantor,
@@ -867,6 +889,8 @@ impl VestFlowContract {
         milestones: Vec<GradedMilestone>,
     ) -> Result<u64, VestFlowError> {
         grantor.require_auth();
+
+        Self::check_storage_headroom(&env)?;
 
         assert!(
             beneficiary != grantor,

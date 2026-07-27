@@ -57,15 +57,18 @@ export default function ScheduleCard({
   const isNative = schedule.token === NATIVE_TOKEN;
   const tokenSymbol = isNative ? "XLM" : `Token (${truncate(schedule.token, 4, 4)})`;
 
+  const vestingEndTime = schedule.start_time + schedule.duration;
+  const isFullyVested = progress >= 100;
+
   const statusColor = schedule.revoked
     ? "bg-red-500/10 text-red-400"
-    : progress >= 100
+    : isFullyVested
     ? "bg-green-500/10 text-green-400"
     : "bg-violet-500/10 text-violet-400";
 
   const statusLabel = schedule.revoked
     ? "Revoked"
-    : progress >= 100
+    : isFullyVested
     ? "Fully Vested"
     : "Vesting";
 
@@ -95,6 +98,11 @@ export default function ScheduleCard({
             {schedule.revocable && (
               <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-700/40 text-zinc-400 border border-zinc-700/60">
                 revocable
+              </span>
+            )}
+            {isFullyVested && !schedule.revoked && (
+              <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20">
+                ✓ {formatDate(vestingEndTime)}
               </span>
             )}
           </div>
