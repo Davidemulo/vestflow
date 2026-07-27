@@ -1802,6 +1802,20 @@ impl VestFlowContract {
             .ok_or(VestFlowError::NotFound)
     }
 
+    /// Return the vesting kind of a schedule without loading the full schedule.
+    ///
+    /// This is a cheap view that lets frontends and SDKs branch on the
+    /// vesting curve type (Linear, Cliff, LinearWithCliff, Graded) without
+    /// paying for a full storage read of the entire `VestingSchedule` struct.
+    ///
+    /// Returns `None` for unknown schedule IDs (does not panic).
+    pub fn vesting_type(env: Env, schedule_id: u64) -> Option<VestingKind> {
+        env.storage()
+            .instance()
+            .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
+            .map(|schedule| schedule.kind)
+    }
+
     /// Check whether a schedule has been revoked without loading the full schedule.
     ///
     /// Cheaper than `get_schedule` when the caller only needs to know revocation
@@ -4208,6 +4222,69 @@ mod test {
         if result.is_ok() {
             assert!(client.pending_upgrade().is_none());
         }
+    }
+
+    // --- Issue #373: vesting_type view ---
+
+    #[test]
+    fn test_vesting_type_returns_kind_for_known_schedule() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Cliff,
+            &false,
+        );
+
+        let kind = client.vesting_type(&id);
+        assert_eq!(kind.unwrap(), VestingKind::Cliff);
+    }
+
+    #[test]
+    fn test_vesting_type_returns_none_for_unknown_id() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _, _, _, _) = setup(&env);
+
+        let kind = client.vesting_type(&999);
+        assert!(kind.is_none());
+    }
+
+    #[test]
+    fn test_vesting_type_all_kinds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+
+        let id_linear = client.create_schedule(
+            &grantor, &beneficiary, &token_addr, &1000, &0, &1000, &0, &0,
+            &VestingKind::Linear, &false,
+        );
+        assert_eq!(client.vesting_type(&id_linear).unwrap(), VestingKind::Linear);
+
+        let id_cliff = client.create_schedule(
+            &grantor, &beneficiary, &token_addr, &1000, &0, &1000, &500, &500,
+            &VestingKind::Cliff, &false,
+        );
+        assert_eq!(client.vesting_type(&id_cliff).unwrap(), VestingKind::Cliff);
+
+        let id_lwc = client.create_schedule(
+            &grantor, &beneficiary, &token_addr, &1000, &0, &1000, &200, &200,
+            &VestingKind::LinearWithCliff, &false,
+        );
+        assert_eq!(client.vesting_type(&id_lwc).unwrap(), VestingKind::LinearWithCliff);
     }
 
     /// vested_at must return exactly total_amount when now == start_time + duration_seconds.
