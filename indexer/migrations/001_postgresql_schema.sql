@@ -152,3 +152,16 @@ COMMENT ON COLUMN vesting_schedules.grantor IS 'Stellar address of the account t
 COMMENT ON COLUMN vesting_schedules.beneficiary IS 'Stellar address of the account receiving vested tokens';
 COMMENT ON COLUMN vesting_schedules.total_amount IS 'Total tokens locked in the schedule (in stroops)';
 COMMENT ON COLUMN vesting_schedules.claimed IS 'Total tokens already claimed by beneficiary';
+
+-- Beneficiary index table for O(1) lookup of schedules by recipient address
+-- Mirrors the BeneficiarySchedules(Address) storage in the smart contract
+CREATE TABLE IF NOT EXISTS beneficiary_schedules (
+  beneficiary VARCHAR(56) NOT NULL,
+  schedule_id BIGINT NOT NULL,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (beneficiary, schedule_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_beneficiary_schedules_beneficiary ON beneficiary_schedules(beneficiary);
+
+COMMENT ON TABLE beneficiary_schedules IS 'Index mapping beneficiary addresses to their schedule IDs for O(1) lookup';

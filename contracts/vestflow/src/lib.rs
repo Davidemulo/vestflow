@@ -344,6 +344,17 @@ impl VestingSchedule {
         }
     }
 
+    /// Timestamp at which this schedule reaches 100% vested.
+    ///
+    /// `duration_seconds` already holds the offset of the last milestone for
+    /// `Graded` schedules (derived at creation time), so this is correct for
+    /// every `VestingKind` without special-casing Graded.
+    pub fn fully_vested_at(&self) -> u64 {
+        self.start_time
+            .saturating_add(self.duration_seconds)
+            .saturating_add(self.paused_duration)
+    }
+
     /// Tokens vested but not yet claimed.
     pub fn claimable_at(&self, now: u64) -> i128 {
         let vested = self.vested_at(now);
@@ -842,6 +853,7 @@ impl VestFlowContract {
     /// Panics with `"Amount must be positive"` if `total_amount` ≤ 0.
     /// Panics with `"Start time cannot be in the past"` if `start_time` < current ledger time.
     /// Panics with `"Milestones required"` if the milestones list is empty.
+    /// Panics with `"Milestone unlock percentage must be non-zero"` if any milestone has 0 bps.
     /// Panics with `"Milestones must sum to 10000 bps"` if the bps total ≠ 10 000.
     pub fn create_graded_schedule(
         env: Env,
@@ -866,6 +878,10 @@ impl VestFlowContract {
             "Start time cannot be in the past"
         );
         assert!(!milestones.is_empty(), "Milestones required");
+
+        for milestone in milestones.iter() {
+            assert!(milestone.bps > 0, "Milestone unlock percentage must be non-zero");
+        }
 
         let total_bps: u64 = milestones.iter().map(|m| m.bps as u64).sum();
         assert!(total_bps == 10_000, "Milestones must sum to 10000 bps");
@@ -1933,6 +1949,19 @@ impl VestFlowContract {
     pub fn vested_amount_current(env: Env, schedule_id: u64) -> i128 {
         let now = env.ledger().timestamp();
         Self::vested_amount(env, schedule_id, now)
+    }
+
+    /// View: return the timestamp at which a schedule reaches 100% vested.
+    ///
+    /// Correct for every `VestingKind`, including `Graded`, where the
+    /// naive client-side `start_time + duration` calculation breaks
+    /// because the last milestone's offset determines full vesting.
+    /// Returns `None` for unknown schedule IDs.
+    pub fn fully_vested_at(env: Env, schedule_id: u64) -> Option<u64> {
+        env.storage()
+            .instance()
+            .get::<DataKey, VestingSchedule>(&DataKey::Schedule(schedule_id))
+            .map(|schedule| schedule.fully_vested_at())
     }
 
     /// Batch view: return vested amounts for multiple schedule IDs in a
@@ -4155,5 +4184,49 @@ mod test {
         if result.is_ok() {
             assert!(client.pending_upgrade().is_none());
         }
+    }
+
+    /// vested_at must return exactly total_amount when now == start_time + duration_seconds.
+    /// This boundary is the off-by-one regression point: one second earlier should still be
+    /// proportional; at the exact end timestamp the full amount must be returned.
+    #[test]
+    fn test_vested_at_returns_total_amount_at_exact_end_boundary() {
+        let env = Env::default();
+
+        let total_amount: i128 = 5_000_000;
+        let start_time: u64 = 1_000;
+        let duration_seconds: u64 = 2_000;
+        let end_time = start_time + duration_seconds;
+
+        let schedule = VestingSchedule {
+            id: 1,
+            grantor: Address::generate(&env),
+            beneficiary: Address::generate(&env),
+            token: Address::generate(&env),
+            total_amount,
+            claimed_amount: 0,
+            start_time,
+            duration_seconds,
+            cliff_seconds: 0,
+            lockup_duration: 0,
+            kind: VestingKind::Linear,
+            revocable: false,
+            revoked: false,
+            vested_at_revoke: 0,
+            paused: false,
+            paused_duration: 0,
+            paused_at: 0,
+            requires_milestones: false,
+            milestones: vec![&env],
+        };
+
+        // One second before the end: must be strictly less than total_amount.
+        assert!(schedule.vested_at(end_time - 1) < total_amount);
+
+        // At exactly start_time + duration_seconds: must equal total_amount.
+        assert_eq!(schedule.vested_at(end_time), total_amount);
+
+        // Any time after must also equal total_amount (caps, never exceeds).
+        assert_eq!(schedule.vested_at(end_time + 1_000), total_amount);
     }
 }
