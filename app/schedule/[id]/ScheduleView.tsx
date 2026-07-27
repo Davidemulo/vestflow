@@ -7,7 +7,7 @@ import AddressLabel from "@/components/AddressLabel";
 import { formatCliffDate, formatDate, NETWORK } from "@/lib/stellar";
 import { useXlmPrice, formatUsd } from "@/lib/price";
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useRef } from "react";
 
 interface ScheduleData {
   id: number;
@@ -36,7 +36,7 @@ export default function ScheduleView({ schedule, claimable: initialClaimable }: 
   const [simulateResult, setSimulateResult] = useState<{ claimable_amount: string; vested_amount: string } | null>(null);
   const [simulateError, setSimulateError] = useState<string | null>(null);
   const [linkCopied, setLinkCopied] = useState(false);
-  const [copyTimerRef] = useState<{ current: ReturnType<typeof setTimeout> | null }>({ current: null });
+  const copyTimerRef = useRef<number | null>(null);
   const xlmPrice = useXlmPrice();
 
   // Set share URL on mount (client-side only)
