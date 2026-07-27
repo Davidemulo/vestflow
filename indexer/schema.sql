@@ -123,3 +123,14 @@ CREATE TABLE IF NOT EXISTS notification_milestones (
 );
 
 CREATE INDEX IF NOT EXISTS idx_milestone_schedule ON notification_milestones (schedule_id);
+
+-- Beneficiary index table for O(1) lookup of schedules by recipient address
+-- Mirrors the BeneficiarySchedules(Address) storage in the smart contract
+CREATE TABLE IF NOT EXISTS beneficiary_schedules (
+  beneficiary TEXT NOT NULL,
+  schedule_id INTEGER NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  PRIMARY KEY (beneficiary, schedule_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_beneficiary_schedules_beneficiary ON beneficiary_schedules (beneficiary);

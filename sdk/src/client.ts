@@ -84,6 +84,11 @@ export class VestflowClient {
   private readonly networkPassphrase: string;
   private readonly signTransaction: ((xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>) | null;
 
+  /**
+   * Create a new VestflowClient.
+   *
+   * @param config - Network and connection overrides. Defaults to testnet.
+   */
   constructor(config: VestflowConfig = {}) {
     const net = config.network ?? "testnet";
     const defaults = DEFAULTS[net];
@@ -401,6 +406,40 @@ export class VestflowClient {
   }
 
   /**
+   * Return the unvested remainder for a schedule — the amount a grantor would
+   * recover by revoking right now.
+   *
+   * The contract has no standalone `remaining_unvested` view, so this composes
+   * `total_amount` (from `get_schedule`) with the `vested_amount_current` view,
+   * mirroring the exact calculation `revoke()` uses on-chain (`total_amount - vested`).
+   *
+   * Returns 0n if the schedule does not exist.
+   */
+  async getRemainingUnvested(scheduleId: number, publicKey?: string): Promise<bigint> {
+    const schedule = await this.getSchedule(scheduleId, publicKey);
+    if (schedule === null) return 0n;
+    const vested = await this.getVestedAmountCurrent(scheduleId, publicKey);
+    const remaining = schedule.total_amount - vested;
+    return remaining > 0n ? remaining : 0n;
+  }
+
+  /**
+   * Return how many tokens are vested for a schedule using the current ledger time.
+   */
+  async getVestedAmountCurrent(id: number, publicKey?: string): Promise<bigint> {
+    try {
+      const val = await this.simulate(
+        "vested_amount_current",
+        [nativeToScVal(id, { type: "u64" })],
+        publicKey
+      );
+      return BigInt(scValToNative(val));
+    } catch {
+      return 0n;
+    }
+  }
+
+  /**
    * Preview how many tokens will be claimable at an arbitrary future timestamp.
    *
    * The result reflects current schedule state projected to `ts` — most
@@ -417,6 +456,31 @@ export class VestflowClient {
       return BigInt(scValToNative(val));
     } catch {
       return 0n;
+    }
+  }
+
+  /**
+   * Fetch the timestamp at which a schedule reaches 100% vested.
+   *
+   * Correct for every vesting kind, including Graded schedules where the
+   * last milestone's offset (not `start_time + duration`) determines the
+   * full-vest point.
+   *
+   * @param id - Schedule ID
+   * @param publicKey - Optional source account for the simulation
+   * @returns Unix timestamp of full vesting, or null for unknown schedule IDs
+   */
+  async getFullyVestedAt(id: number, publicKey?: string): Promise<number | null> {
+    try {
+      const val = await this.simulate(
+        "fully_vested_at",
+        [nativeToScVal(id, { type: "u64" })],
+        publicKey
+      );
+      const native = scValToNative(val);
+      return native == null ? null : Number(native);
+    } catch {
+      return null;
     }
   }
 
@@ -442,11 +506,15 @@ export class VestflowClient {
    * @param params - Schedule parameters
    * @param signer - Function that signs the transaction XDR (e.g. Freighter's signTransaction)
    * @returns Transaction hash
+   * @throws If `params.beneficiary` equals `params.grantor`
    */
   async createSchedule(
     params: CreateScheduleParams,
     signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
   ): Promise<string> {
+    if (params.beneficiary === params.grantor) {
+      throw new Error("beneficiary must be different from grantor");
+    }
     const totalStroops = xlmToStroops(params.totalAmountXlm);
     const durationSecs = params.durationDays * 86400;
     const cliffSecs = params.cliffDays * 86400;
@@ -475,11 +543,15 @@ export class VestflowClient {
    * @param params - Graded schedule parameters including milestone list
    * @param signer - Function that signs the transaction XDR (e.g. Freighter's signTransaction)
    * @returns Transaction hash
+   * @throws If `params.beneficiary` equals `params.grantor`
    */
   async createGradedSchedule(
     params: CreateGradedScheduleParams,
     signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
   ): Promise<string> {
+    if (params.beneficiary === params.grantor) {
+      throw new Error("beneficiary must be different from grantor");
+    }
     const totalStroops = BigInt(Math.round(params.totalAmountXlm * 10_000_000));
     const lockupSecs = params.lockupDays * 86400;
 
