@@ -84,6 +84,11 @@ export class VestflowClient {
   private readonly networkPassphrase: string;
   private readonly signTransaction: ((xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>) | null;
 
+  /**
+   * Create a new VestflowClient.
+   *
+   * @param config - Network and connection overrides. Defaults to testnet.
+   */
   constructor(config: VestflowConfig = {}) {
     const net = config.network ?? "testnet";
     const defaults = DEFAULTS[net];
@@ -455,6 +460,31 @@ export class VestflowClient {
   }
 
   /**
+   * Fetch the timestamp at which a schedule reaches 100% vested.
+   *
+   * Correct for every vesting kind, including Graded schedules where the
+   * last milestone's offset (not `start_time + duration`) determines the
+   * full-vest point.
+   *
+   * @param id - Schedule ID
+   * @param publicKey - Optional source account for the simulation
+   * @returns Unix timestamp of full vesting, or null for unknown schedule IDs
+   */
+  async getFullyVestedAt(id: number, publicKey?: string): Promise<number | null> {
+    try {
+      const val = await this.simulate(
+        "fully_vested_at",
+        [nativeToScVal(id, { type: "u64" })],
+        publicKey
+      );
+      const native = scValToNative(val);
+      return native == null ? null : Number(native);
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Fetch all schedules ever created.
    *
    * Uses get_schedule_batch to fetch all schedules in a single simulation
@@ -476,11 +506,15 @@ export class VestflowClient {
    * @param params - Schedule parameters
    * @param signer - Function that signs the transaction XDR (e.g. Freighter's signTransaction)
    * @returns Transaction hash
+   * @throws If `params.beneficiary` equals `params.grantor`
    */
   async createSchedule(
     params: CreateScheduleParams,
     signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
   ): Promise<string> {
+    if (params.beneficiary === params.grantor) {
+      throw new Error("beneficiary must be different from grantor");
+    }
     const totalStroops = xlmToStroops(params.totalAmountXlm);
     const durationSecs = params.durationDays * 86400;
     const cliffSecs = params.cliffDays * 86400;
@@ -509,11 +543,15 @@ export class VestflowClient {
    * @param params - Graded schedule parameters including milestone list
    * @param signer - Function that signs the transaction XDR (e.g. Freighter's signTransaction)
    * @returns Transaction hash
+   * @throws If `params.beneficiary` equals `params.grantor`
    */
   async createGradedSchedule(
     params: CreateGradedScheduleParams,
     signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
   ): Promise<string> {
+    if (params.beneficiary === params.grantor) {
+      throw new Error("beneficiary must be different from grantor");
+    }
     const totalStroops = BigInt(Math.round(params.totalAmountXlm * 10_000_000));
     const lockupSecs = params.lockupDays * 86400;
 
