@@ -910,6 +910,7 @@ impl VestFlowContract {
         assert!(!milestones.is_empty(), "Milestones required");
 
         for milestone in milestones.iter() {
+            assert!(milestone.bps > 0, "Milestone unlock percentage must be non-zero");
             assert!(
                 milestone.bps > 0,
                 "Milestone unlock percentage must be non-zero"
