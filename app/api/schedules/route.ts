@@ -2,8 +2,8 @@ import crypto from "crypto";
 import {
   getClaimableBulk,
   getScheduleBatch,
-  getSchedulesByBeneficiary,
-  getSchedulesByGrantor,
+  getGrantorScheduleIds,
+  getBeneficiaryScheduleIds,
   NETWORK,
 } from "@/lib/stellar";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
@@ -74,8 +74,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     const page = pageParam ? Math.max(1, parseInt(pageParam, 10)) : 1;
     const limit = limitParam ? Math.max(1, parseInt(limitParam, 10)) : 20;
 
-    const grantorIds = await getSchedulesByGrantor(address);
-    const beneficiaryIds = await getSchedulesByBeneficiary(address);
+    const grantorIds = await getGrantorScheduleIds(address);
+    const beneficiaryIds = await getBeneficiaryScheduleIds(address);
     const ids = Array.from(new Set([...grantorIds, ...beneficiaryIds])).sort(
       (a, b) => a - b
     );

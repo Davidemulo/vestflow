@@ -137,9 +137,27 @@ export async function getSchedulesByGrantor(grantor: string): Promise<number[]> 
   } catch { return []; }
 }
 
+export async function getGrantorScheduleIds(grantor: string): Promise<number[]> {
+  try {
+    const val = await simulate("grantor_schedule_ids", [
+      nativeToScVal(grantor, { type: "address" }),
+    ]);
+    return (scValToNative(val) as number[]).map(Number);
+  } catch { return []; }
+}
+
 export async function getSchedulesByBeneficiary(beneficiary: string): Promise<number[]> {
   try {
     const val = await simulate("get_schedules_by_beneficiary", [
+      nativeToScVal(beneficiary, { type: "address" }),
+    ]);
+    return (scValToNative(val) as number[]).map(Number);
+  } catch { return []; }
+}
+
+export async function getBeneficiaryScheduleIds(beneficiary: string): Promise<number[]> {
+  try {
+    const val = await simulate("beneficiary_schedule_ids", [
       nativeToScVal(beneficiary, { type: "address" }),
     ]);
     return (scValToNative(val) as number[]).map(Number);
