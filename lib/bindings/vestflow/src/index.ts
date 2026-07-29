@@ -281,12 +281,35 @@ export interface Client {
   get_schedules_by_grantor: ({grantor}: {grantor: string}, options?: MethodOptions) => Promise<AssembledTransaction<Array<u64>>>
 
   /**
+   * Construct and simulate a grantor_schedule_ids transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Return **all** schedule IDs created by a given grantor, combining
+   * single-token and multi-token schedules into a single list.
+   *
+   * The frontend can use this single view to load every schedule a
+   * grantor has created without fetching the entire schedule space and
+   * filtering client-side.
+   *
+   * Returns an empty vec if the grantor has not created any schedules.
+   */
+  grantor_schedule_ids: ({grantor}: {grantor: string}, options?: MethodOptions) => Promise<AssembledTransaction<Array<u64>>>
+
+  /**
    * Construct and simulate a get_schedules_by_beneficiary transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Return schedule IDs where the given address is the beneficiary.
    *
    * Returns an empty vec if the address has no beneficiary schedules.
    */
   get_schedules_by_beneficiary: ({beneficiary}: {beneficiary: string}, options?: MethodOptions) => Promise<AssembledTransaction<Array<u64>>>
+
+  /**
+   * Construct and simulate a beneficiary_schedule_ids transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Return **all** schedule IDs where the given address is the
+   * beneficiary, combining single-token and multi-token schedules into
+   * a single list.
+   *
+   * Returns an empty vec if the address has no beneficiary schedules.
+   */
+  beneficiary_schedule_ids: ({beneficiary}: {beneficiary: string}, options?: MethodOptions) => Promise<AssembledTransaction<Array<u64>>>
 
   /**
    * Construct and simulate a initialize_upgrade_authority transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -359,7 +382,9 @@ export class Client extends ContractClient {
         upgrade_authority: this.txFromJSON<string>,
         transfer_beneficiary: this.txFromJSON<null>,
         get_schedules_by_grantor: this.txFromJSON<Array<u64>>,
+        grantor_schedule_ids: this.txFromJSON<Array<u64>>,
         get_schedules_by_beneficiary: this.txFromJSON<Array<u64>>,
+        beneficiary_schedule_ids: this.txFromJSON<Array<u64>>,
         initialize_upgrade_authority: this.txFromJSON<null>
   }
 }

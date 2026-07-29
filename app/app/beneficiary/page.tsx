@@ -11,6 +11,8 @@ import {
 import {
   getAllSchedules,
   getClaimableBulk,
+  getBeneficiaryScheduleIds,
+  getScheduleBatch,
   ScheduleData,
   stroopsToXlm,
   vestingProgress,
@@ -49,10 +51,12 @@ export default function BeneficiaryDashboardPage() {
   const load = async () => {
     setLoading(true);
     try {
-      const all = await getAllSchedules(publicKey ?? undefined);
       if (publicKey) {
-        // Filter to only schedules where user is beneficiary
-        const beneficiarySchedules = all.filter(s => s.beneficiary === publicKey);
+        // Use the on-chain beneficiary index instead of fetching all schedules.
+        const beneficiaryIds = await getBeneficiaryScheduleIds(publicKey);
+        const beneficiarySchedules = beneficiaryIds.length > 0
+          ? (await getScheduleBatch(beneficiaryIds, publicKey)).filter(Boolean) as ScheduleData[]
+          : [];
         setSchedules(beneficiarySchedules);
 
         // Compute aggregate stats

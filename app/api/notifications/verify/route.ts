@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createEndpointSpecificRateLimiter } from "@/lib/rateLimit";
+import { getVapidPublicKey, isWebPushConfigured } from "@/lib/webPush";
 
 const rateLimiter = createEndpointSpecificRateLimiter(60000, 10, "verify");
 
@@ -23,6 +24,18 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
     const searchParams = request.nextUrl.searchParams;
     const token = searchParams.get("token");
+    const action = searchParams.get("action");
+
+    // Return VAPID public key for web push client setup
+    if (action === "vapidPublicKey") {
+      if (!isWebPushConfigured()) {
+        return NextResponse.json(
+          { error: "Web Push is not configured" },
+          { status: 501 }
+        );
+      }
+      return NextResponse.json({ publicKey: getVapidPublicKey() });
+    }
 
     if (!token) {
       return NextResponse.json(

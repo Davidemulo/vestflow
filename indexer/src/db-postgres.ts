@@ -211,3 +211,30 @@ export async function closePool(): Promise<void> {
     pool = null;
   }
 }
+
+// ── Beneficiary Index ─────────────────────────────────────────────────────
+
+/**
+ * Insert a beneficiary-schedule mapping into the index table.
+ * Called when a schedule is created.
+ */
+export async function insertBeneficiarySchedule(beneficiary: string, scheduleId: number): Promise<void> {
+  await getPool().query(
+    `INSERT INTO beneficiary_schedules (beneficiary, schedule_id)
+     VALUES ($1, $2)
+     ON CONFLICT (beneficiary, schedule_id) DO NOTHING`,
+    [beneficiary, scheduleId]
+  );
+}
+
+/**
+ * Get all schedule IDs for a beneficiary address using the index.
+ * Provides O(1) lookup by leveraging the beneficiary_schedules table.
+ */
+export async function getScheduleIdsByBeneficiary(beneficiary: string): Promise<number[]> {
+  const result = await getPool().query(
+    "SELECT schedule_id FROM beneficiary_schedules WHERE beneficiary = $1 ORDER BY created_at DESC",
+    [beneficiary]
+  );
+  return result.rows.map((row: any) => row.schedule_id);
+}

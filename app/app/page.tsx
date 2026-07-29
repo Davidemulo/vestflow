@@ -14,9 +14,13 @@ import {
   getAllSchedules,
   getClaimableBulk,
   getVestedAmountBulk,
+  getGrantorScheduleIds,
+  getBeneficiaryScheduleIds,
+  getScheduleBatch,
   ScheduleData,
   vestingProgress,
   NATIVE_TOKEN,
+  stroopsToXlm,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
 import { useCountUp } from "@/hooks/useCountUp";
@@ -28,6 +32,7 @@ import { buildCombinedExportCSV, downloadCSV } from "@/lib/csvExport";
 
 type RoleFilter = "all" | "grantor" | "beneficiary";
 type StatusFilter = "all" | "active" | "completed" | "revoked";
+type KindFilter = "all" | "Linear" | "Cliff" | "LinearWithCliff" | "Graded";
 type SortKey = "newest" | "ending-soon" | "largest-amount" | "status";
 const PAGE_SIZE = 10;
 
@@ -78,7 +83,7 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
     return () => cancelAnimationFrame(id);
   }, []);
 
-  const toXlm = (v: bigint) => Number(v) / 10_000_000;
+  const toXlm = (v: bigint) => parseFloat(stroopsToXlm(v));
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-8">
@@ -122,6 +127,31 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
   );
 }
 
+function RpcErrorBanner({ onDismiss }: { onDismiss: () => void }) {
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-3 mb-6 px-4 py-3 rounded-xl border border-red-500/30 bg-red-500/10 text-red-300 text-sm"
+    >
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 shrink-0" aria-hidden="true">
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+      <span className="flex-1">
+        Could not reach the Stellar RPC — check your connection and refresh.
+      </span>
+      <button
+        onClick={onDismiss}
+        aria-label="Dismiss error banner"
+        className="text-red-400 hover:text-red-200 transition-colors ml-2 leading-none"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const { publicKey } = useWallet();
   const { getLabel } = useAddressBook();
@@ -129,9 +159,11 @@ export default function DashboardPage() {
   const [schedules, setSchedules] = useState<ScheduleData[]>([]);
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(false);
+  const [rpcError, setRpcError] = useState(false);
   const [roleFilter, setRoleFilter] = useState<RoleFilter>("all");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [tokenFilter, setTokenFilter] = useState<string>("all");
+  const [kindFilter, setKindFilter] = useState<KindFilter>("all");
   const [startDateFilter, setStartDateFilter] = useState<string>("");
   const [endDateFilter, setEndDateFilter] = useState<string>("");
   const [sortBy, setSortBy] = useState<SortKey>("newest");
@@ -140,10 +172,18 @@ export default function DashboardPage() {
 
   const load = async () => {
     setLoading(true);
+    setRpcError(false);
     try {
-      const all = await getAllSchedules(publicKey ?? undefined);
       if (publicKey) {
-        const userSchedules = all.filter(s => s.grantor === publicKey || s.beneficiary === publicKey);
+        // Use the on-chain grantor/beneficiary index instead of fetching all schedules.
+        const [grantorIds, beneficiaryIds] = await Promise.all([
+          getGrantorScheduleIds(publicKey),
+          getBeneficiaryScheduleIds(publicKey),
+        ]);
+        const allIds = [...new Set([...grantorIds, ...beneficiaryIds])].sort((a, b) => a - b);
+        const userSchedules = allIds.length > 0
+          ? (await getScheduleBatch(allIds, publicKey)).filter(Boolean) as ScheduleData[]
+          : [];
         setSchedules(userSchedules);
 
         // Compute aggregate stats
@@ -181,10 +221,20 @@ export default function DashboardPage() {
 
         setStats({ totalGranted, totalReceiving, claimableNow, totalVested, activeSchedules });
       } else {
+        const all = await getAllSchedules();
         setSchedules(all.slice(0, 6));
         setStats(null);
       }
-    } finally { setLoading(false); }
+    } catch (err) {
+      const isNetworkError =
+        err instanceof TypeError ||
+        (err instanceof Error && /fetch|network|rpc|connect|econnrefused|timeout/i.test(err.message));
+      if (isNetworkError) {
+        setRpcError(true);
+      }
+    } finally {
+      setLoading(false);
+    }
   };
 
   useEffect(() => { load(); }, [publicKey]);
@@ -230,6 +280,11 @@ export default function DashboardPage() {
       filtered = filtered.filter(s => s.token === tokenFilter);
     }
 
+    // Vesting kind filter
+    if (kindFilter !== "all") {
+      filtered = filtered.filter(s => s.kind === kindFilter);
+    }
+
     // Date range filters
     if (startDateFilter) {
       const startTimestamp = new Date(startDateFilter).getTime() / 1000;
@@ -241,7 +296,7 @@ export default function DashboardPage() {
     }
 
     return filtered;
-  }, [roleFiltered, statusFilter, tokenFilter, startDateFilter, endDateFilter]);
+  }, [roleFiltered, statusFilter, tokenFilter, kindFilter, startDateFilter, endDateFilter]);
 
   // Apply sort on top of the multi-filtered list
   const sortedSchedules = useMemo(() => {
@@ -280,7 +335,7 @@ export default function DashboardPage() {
   }, [sortedSchedules, q, getLabel]);
 
   // Reset to page 1 whenever the filtered set changes
-  useEffect(() => { setPage(1); }, [searchFiltered.length, roleFilter, statusFilter, tokenFilter, startDateFilter, endDateFilter, sortBy]);
+  useEffect(() => { setPage(1); }, [searchFiltered.length, roleFilter, statusFilter, tokenFilter, kindFilter, startDateFilter, endDateFilter, sortBy]);
 
   const totalPages = Math.max(1, Math.ceil(searchFiltered.length / PAGE_SIZE));
   const pageStart = (page - 1) * PAGE_SIZE;
@@ -295,17 +350,21 @@ export default function DashboardPage() {
   const clearAllFilters = () => {
     setStatusFilter("all");
     setTokenFilter("all");
+    setKindFilter("all");
     setStartDateFilter("");
     setEndDateFilter("");
     setQuery("");
   };
 
-  const hasActiveFilters = statusFilter !== "all" || tokenFilter !== "all" || startDateFilter || endDateFilter || query;
+  const hasActiveFilters = statusFilter !== "all" || tokenFilter !== "all" || kindFilter !== "all" || startDateFilter || endDateFilter || query;
 
   return (
     <>
       <Navbar />
       <main className="max-w-5xl mx-auto px-4 sm:px-6 pt-24 sm:pt-28 pb-20">
+        {/* RPC offline banner (#278) */}
+        {rpcError && <RpcErrorBanner onDismiss={() => setRpcError(false)} />}
+
         {/* Header row */}
         <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
           <div>
@@ -374,7 +433,7 @@ export default function DashboardPage() {
               )}
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-3">
               {/* Status filter */}
               <div>
                 <label htmlFor="status-filter" className="block text-xs text-zinc-500 mb-1.5">
@@ -390,6 +449,25 @@ export default function DashboardPage() {
                   <option value="active">Active</option>
                   <option value="completed">Completed</option>
                   <option value="revoked">Revoked</option>
+                </select>
+              </div>
+
+              {/* Vesting kind filter */}
+              <div>
+                <label htmlFor="kind-filter" className="block text-xs text-zinc-500 mb-1.5">
+                  Vesting Kind
+                </label>
+                <select
+                  id="kind-filter"
+                  value={kindFilter}
+                  onChange={e => setKindFilter(e.target.value as KindFilter)}
+                  className="w-full text-xs bg-white/5 border border-white/10 rounded-lg px-2.5 py-2 text-zinc-300 outline-none focus:border-violet-500/50 transition-colors"
+                >
+                  <option value="all">All kinds</option>
+                  <option value="Linear">Linear</option>
+                  <option value="Cliff">Cliff</option>
+                  <option value="LinearWithCliff">Linear with Cliff</option>
+                  <option value="Graded">Graded</option>
                 </select>
               </div>
 
