@@ -61,6 +61,12 @@ export interface ScheduleData {
   revoked: boolean;
   /** Whether this schedule is currently paused. */
   paused: boolean;
+  /** Lockup duration in seconds from start_time. */
+  lockup_duration: number;
+  /** Whether this schedule requires milestones for graded vesting. */
+  requires_milestones: boolean;
+  /** Timestamp when vested balance was determined after revoke. */
+  vested_at_revoke: bigint;
   /** Cumulative time (in seconds) the schedule has been paused. */
   paused_duration: number;
   /** Unix timestamp when the schedule was last paused (0 if not paused). */
