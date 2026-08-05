@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
+import confetti from "canvas-confetti";
 import {
   ScheduleData,
   stroopsToXlm,
@@ -69,6 +70,17 @@ export default function ClaimModal({
         txHash: hash,
         network: NETWORK,
       });
+      
+      const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      if (!prefersReducedMotion) {
+        confetti({
+          particleCount: 100,
+          spread: 70,
+          origin: { y: 0.6 },
+          zIndex: 9999,
+        });
+      }
+      
       onSuccess();
     } catch (e: any) {
       const msg = parseContractError(e);
