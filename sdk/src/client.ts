@@ -224,6 +224,9 @@ export class VestflowClient {
       revocable: Boolean(raw.revocable),
       revoked: Boolean(raw.revoked),
       paused: Boolean(raw.paused),
+      lockup_duration: Number(raw.lockup_duration ?? raw.lockup_seconds ?? 0),
+      requires_milestones: Boolean(raw.requires_milestones),
+      vested_at_revoke: BigInt(raw.vested_at_revoke ?? 0),
       paused_duration: Number(raw.paused_duration ?? 0),
       paused_at: Number(raw.paused_at ?? 0),
     };
@@ -275,11 +278,41 @@ export class VestflowClient {
   }
 
   /**
+   * Return all schedule IDs created by a given grantor, combining
+   * single-token and multi-token schedules into a single list.
+   */
+  async getGrantorScheduleIds(grantor: string): Promise<number[]> {
+    try {
+      const val = await this.simulate("grantor_schedule_ids", [
+        nativeToScVal(grantor, { type: "address" }),
+      ]);
+      return (scValToNative(val) as number[]).map(Number);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Return schedule IDs where the given address is the beneficiary.
    */
   async getSchedulesByBeneficiary(beneficiary: string): Promise<number[]> {
     try {
       const val = await this.simulate("get_schedules_by_beneficiary", [
+        nativeToScVal(beneficiary, { type: "address" }),
+      ]);
+      return (scValToNative(val) as number[]).map(Number);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Return all schedule IDs where the given address is the beneficiary,
+   * combining single-token and multi-token schedules into a single list.
+   */
+  async getBeneficiaryScheduleIds(beneficiary: string): Promise<number[]> {
+    try {
+      const val = await this.simulate("beneficiary_schedule_ids", [
         nativeToScVal(beneficiary, { type: "address" }),
       ]);
       return (scValToNative(val) as number[]).map(Number);
