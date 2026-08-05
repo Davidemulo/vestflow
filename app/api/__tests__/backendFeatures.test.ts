@@ -5,6 +5,14 @@ import { GET as getSchedules } from "../schedules/route";
 import { GET as getScheduleHistory } from "../schedules/[id]/history/route";
 import { GET as getAnalyticsStats } from "../analytics/stats/route";
 import { GET as getContractVersion } from "../contracts/version/route";
+import { GET as getContractMetrics } from "../contracts/metrics/route";
+import { promises as fs } from "fs";
+
+vi.mock("fs/promises", () => ({
+  promises: {
+    readFile: vi.fn(),
+  },
+}));
 
 vi.mock("@/lib/stellar", () => ({
   NETWORK: "testnet",
@@ -182,6 +190,37 @@ describe("Backend Features (#428, #429, #430, #431)", () => {
       expect(body.version).toBe(1);
       expect(body.contract_id).toBeTruthy();
       expect(body.network).toBe("testnet");
+    });
+  });
+
+  describe("Issue #432: GET /api/contracts/metrics endpoint", () => {
+    it("returns contract metrics from metrics.json", async () => {
+      const mockMetrics = {
+        wasm_bytes: 12345,
+        optimized_wasm_bytes: 6789,
+        create_schedule_worst_case_storage_entries: 4,
+      };
+      (fs.readFile as any).mockResolvedValue(JSON.stringify(mockMetrics));
+
+      const req = new NextRequest("http://localhost:3000/api/contracts/metrics");
+      const res = await getContractMetrics(req);
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get("Content-Type")).toContain("application/json");
+      const body = await res.json();
+      expect(body.wasm_bytes).toBe(12345);
+      expect(body.create_schedule_worst_case_storage_entries).toBe(4);
+    });
+
+    it("returns 503 when metrics.json is missing or invalid", async () => {
+      (fs.readFile as any).mockRejectedValue(new Error("File not found"));
+
+      const req = new NextRequest("http://localhost:3000/api/contracts/metrics");
+      const res = await getContractMetrics(req);
+
+      expect(res.status).toBe(503);
+      const body = await res.json();
+      expect(body.error).toBe("Failed to fetch contract metrics");
     });
   });
 });
