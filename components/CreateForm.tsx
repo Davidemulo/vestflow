@@ -466,14 +466,14 @@ export default function CreateForm() {
             value={form.tokenAddress.trim()}
             full
           />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <SummaryItem
               label="Total Amount"
               value={`${form.amount} ${tokenLabel}`}
             />
             <SummaryItem label="Vesting Type" value={kindDisplay} />
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <SummaryItem
               label="Start Date & Time"
               value={`${form.startDate} ${form.startTime}`}
@@ -483,7 +483,7 @@ export default function CreateForm() {
               value={`${form.durationDays} days`}
             />
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <SummaryItem label="Cliff Duration" value={cliffDisplay} />
             <SummaryItem
               label="Revocable"
@@ -495,7 +495,7 @@ export default function CreateForm() {
             />
           </div>
           <div className="pt-1 border-t border-white/5">
-            <p className="text-xs text-zinc-500">
+            <p className="text-xs text-zinc-500 break-all">
               Contract: <span className="font-mono text-zinc-400">{CONTRACT_ID}</span>
             </p>
           </div>
@@ -508,7 +508,7 @@ export default function CreateForm() {
               type="date"
               value={previewDate}
               onChange={(e) => setPreviewDate(e.target.value)}
-              className="input text-sm px-3 py-1.5 rounded-lg bg-zinc-800/60 border border-zinc-700 text-zinc-200 focus:outline-none focus:border-violet-500 w-full"
+              className="input text-sm px-3 py-1.5 rounded-lg bg-zinc-800/60 border border-zinc-700 text-zinc-200 focus:outline-none focus:border-violet-500 w-full min-w-0"
             />
             {previewDate &&
               form.amount &&
@@ -667,7 +667,7 @@ export default function CreateForm() {
         />
       </Field>
 
-      <fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4 border-0 p-0 m-0">
+      <fieldset className="grid grid-cols-1 md:grid-cols-2 gap-4 border-0 p-0 m-0">
         <legend className="sr-only">Schedule start date and time</legend>
         <Field
           label="Start Date"
@@ -682,7 +682,7 @@ export default function CreateForm() {
             onBlur={() => touch("startDate")}
             required
             aria-invalid={!!visibleErrors.startDate}
-            className={`input ${visibleErrors.startDate ? "border-red-500/60 focus:border-red-500" : ""}`}
+            className={`input w-full min-w-0 ${visibleErrors.startDate ? "border-red-500/60 focus:border-red-500" : ""}`}
           />
         </Field>
         <Field label="Start Time" htmlFor="startTime">
@@ -693,7 +693,7 @@ export default function CreateForm() {
             onChange={(e) => set("startTime", e.target.value)}
             onBlur={() => touch("startTime")}
             required
-            className="input"
+            className="input w-full min-w-0"
           />
         </Field>
       </fieldset>
@@ -722,17 +722,17 @@ export default function CreateForm() {
 
       <fieldset className="flex flex-col gap-3 border-0 p-0 m-0">
         <legend className="text-sm text-zinc-400">Vesting Type</legend>
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2 sm:gap-3">
           {KIND_OPTIONS.map(({ value, label, description }) => (
             <label
               key={value}
-              className={`flex flex-col gap-1.5 p-3 rounded-xl border cursor-pointer transition-colors ${
+              className={`flex flex-col gap-1.5 p-2 sm:p-3 rounded-xl border cursor-pointer transition-colors ${
                 form.kind === value
                   ? "border-violet-500/60 bg-violet-500/10"
                   : "border-white/8 hover:border-white/20"
               }`}
             >
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 min-w-0">
                 <input
                   type="radio"
                   name="kind"
@@ -742,14 +742,14 @@ export default function CreateForm() {
                     set("kind", value);
                     if (value === "Linear") set("cliffDays", "0");
                   }}
-                  className="accent-violet-500"
+                  className="accent-violet-500 shrink-0"
                   aria-label={label}
                 />
-                <span className="text-sm font-medium text-zinc-200">
+                <span className="text-xs sm:text-sm font-medium text-zinc-200 leading-tight">
                   {label}
                 </span>
               </div>
-              <p className="text-xs text-zinc-500 leading-relaxed">
+              <p className="text-[11px] sm:text-xs text-zinc-500 leading-relaxed">
                 {description}
               </p>
             </label>
