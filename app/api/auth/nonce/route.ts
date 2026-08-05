@@ -1,0 +1,41 @@
+import { NextRequest, NextResponse } from "next/server";
+import { randomBytes } from "crypto";
+import { getDb } from "@/indexer/src/db";
+import { isValidStellarAddress } from "@/lib/stellar-verify";
+
+const NONCE_VALIDITY_MS = 5 * 60 * 1000; // 5 minutes (must match verify route)
+
+/**
+ * POST /api/auth/nonce
+ * Issues a short-lived, single-use nonce for a wallet to sign with Freighter.
+ */
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  try {
+    const body = await request.json();
+    const { publicKey } = body;
+
+    if (!publicKey || typeof publicKey !== "string") {
+      return NextResponse.json({ error: "publicKey is required" }, { status: 400 });
+    }
+
+    if (!isValidStellarAddress(publicKey)) {
+      return NextResponse.json({ error: "Invalid Stellar address format" }, { status: 400 });
+    }
+
+    const nonce = randomBytes(32).toString("hex");
+    const expiresAt = new Date(Date.now() + NONCE_VALIDITY_MS).toISOString();
+
+    const db = getDb();
+
+    // Only one outstanding nonce per wallet at a time.
+    db.prepare("DELETE FROM nonces WHERE public_key = ?").run(publicKey);
+    db.prepare(
+      "INSERT INTO nonces (nonce, public_key, expires_at) VALUES (?, ?, ?)"
+    ).run(nonce, publicKey, expiresAt);
+
+    return NextResponse.json({ nonce, expiresAt }, { status: 200 });
+  } catch (error) {
+    console.error("Error issuing nonce:", error);
+    return NextResponse.json({ error: "Failed to issue nonce" }, { status: 500 });
+  }
+}
