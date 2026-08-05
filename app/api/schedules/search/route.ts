@@ -1,8 +1,8 @@
 import {
   getClaimableBulk,
   getScheduleBatch,
-  getSchedulesByGrantor,
-  getSchedulesByBeneficiary,
+  getGrantorScheduleIds,
+  getBeneficiaryScheduleIds,
   getScheduleCount,
   NETWORK,
 } from "@/lib/stellar";
@@ -56,8 +56,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // If the query looks like a full Stellar address, do a targeted lookup
     if (STELLAR_ADDRESS_RE.test(query)) {
       const [grantorIds, beneficiaryIds] = await Promise.all([
-        getSchedulesByGrantor(query),
-        getSchedulesByBeneficiary(query),
+        getGrantorScheduleIds(query),
+        getBeneficiaryScheduleIds(query),
       ]);
       const ids = Array.from(new Set([...grantorIds, ...beneficiaryIds])).sort((a, b) => a - b);
 
