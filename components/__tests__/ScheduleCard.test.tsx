@@ -53,6 +53,8 @@ const BASE_SCHEDULE: ScheduleData = {
   paused_duration: 0,
   paused_at: 0,
   lockup_duration: 0,
+  requires_milestones: false,
+  vested_at_revoke: 0n,
 };
 
 function makeSchedule(overrides: Partial<ScheduleData> = {}): ScheduleData {

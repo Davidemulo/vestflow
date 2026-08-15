@@ -46,7 +46,7 @@ test.describe("Create Schedule happy path", () => {
     // Duration — select "6 months" or fill custom.
     const durationSelect = page.getByLabel(/duration/i);
     if (await durationSelect.isVisible()) {
-      await durationSelect.selectOption({ label: /6.*month/i });
+      await durationSelect.selectOption({ label: "6 months" });
     } else {
       // Custom duration input (days).
       const durationInput = page.getByLabel(/duration.*day/i);

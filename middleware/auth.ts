@@ -56,7 +56,7 @@ export async function verifyAuth(
   }
 
   return {
-    publicKey: payload.publicKey,
+    publicKey: payload.sub,
     error: null,
     response: null,
   };

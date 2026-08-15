@@ -90,3 +90,14 @@ export function verifyJWT(token: string): JWTPayload | null {
 
   return payload;
 }
+
+/**
+ * Extracts a Bearer token from an Authorization header value.
+ * Returns null if the header is missing or not in Bearer format.
+ */
+export function extractTokenFromHeader(header: string | null): string | null {
+  if (!header) return null;
+  const parts = header.split(" ");
+  if (parts.length !== 2 || parts[0].toLowerCase() !== "bearer") return null;
+  return parts[1];
+}

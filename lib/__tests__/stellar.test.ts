@@ -23,6 +23,8 @@ function makeSchedule(overrides: Partial<ScheduleData> = {}): ScheduleData {
     revocable: true,
     revoked: false,
     paused: false,
+    paused_duration: 0,
+    paused_at: 0,
     requires_milestones: false,
     vested_at_revoke: 0n,
     ...overrides,
