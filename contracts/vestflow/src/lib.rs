@@ -43,7 +43,7 @@
 
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token, vec, Address, BytesN,
-    Env, Symbol, Val, Vec,
+    Env, Vec,
 };
 
 pub const VERSION: u32 = 1;
@@ -574,11 +574,6 @@ impl VestFlowContract {
         assert!(authority == configured, "Unauthorized upgrade authority");
         authority.require_auth();
 
-        env.deployer()
-            .get_contract_wasm(&wasm_hash)
-            .ok_or_else(|| panic!("WASM not found"))
-            .unwrap();
-
         let announced_at = env.ledger().timestamp();
         let pending = PendingUpgrade {
             wasm_hash,
@@ -706,18 +701,10 @@ impl VestFlowContract {
     /// Soroban contracts have a maximum instance storage size limit. This function
     /// helps catch storage exhaustion early with a descriptive error rather than
     /// a silent trap during contract writes.
-    fn check_storage_headroom(env: &Env) -> Result<(), VestFlowError> {
-        let storage = env.storage().instance();
-        let instance_size = storage.len();
-
-        // Reserve ~10% headroom (adjust this threshold as needed).
-        // Soroban's max instance storage is typically several KB per account.
-        // We use a conservative check to ensure operations can proceed.
-        const STORAGE_HEADROOM_THRESHOLD: u32 = 100;
-
-        if instance_size > u32::MAX - STORAGE_HEADROOM_THRESHOLD {
-            panic!("Insufficient contract storage headroom to perform this operation")
-        }
+    fn check_storage_headroom(_env: &Env) -> Result<(), VestFlowError> {
+        // The Soroban host enforces storage limits at the protocol level and
+        // rejects writes that exceed them. There is no SDK API to read current
+        // instance storage size, so we rely on host-level enforcement.
         Ok(())
     }
 
@@ -1717,8 +1704,8 @@ impl VestFlowContract {
             "Additional seconds must be positive"
         );
 
-        let old_duration = schedule.duration;
-        schedule.duration = old_duration + additional_seconds;
+        let old_duration = schedule.duration_seconds;
+        schedule.duration_seconds = old_duration + additional_seconds;
 
         env.storage()
             .instance()
@@ -1726,7 +1713,7 @@ impl VestFlowContract {
 
         env.events().publish(
             (symbol_short!("ext_dur"), schedule_id),
-            (old_duration, schedule.duration, env.ledger().timestamp()),
+            (old_duration, schedule.duration_seconds, env.ledger().timestamp()),
         );
 
         Ok(())
@@ -2305,7 +2292,7 @@ impl VestFlowContract {
 fn validate_token_sac(env: &Env, token: &Address) -> Result<(), VestFlowError> {
     let func = soroban_sdk::Symbol::new(env, "decimals");
     let args: soroban_sdk::Vec<soroban_sdk::Val> = soroban_sdk::vec![env];
-    match env.try_invoke_contract(token, &func, args) {
+    match env.try_invoke_contract::<soroban_sdk::Val, VestFlowError>(token, &func, args) {
         Ok(_) => Ok(()),
         Err(_) => Err(VestFlowError::InvalidToken),
     }

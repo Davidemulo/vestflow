@@ -438,6 +438,8 @@ export interface ScheduleData {
   revocable: boolean;
   revoked: boolean;
   paused: boolean;
+  paused_duration: number;
+  paused_at: number;
   requires_milestones: boolean;
   vested_at_revoke: bigint;
   milestones?: { pct: number; timestamp: number }[];
@@ -466,6 +468,8 @@ function parseSchedule(raw: any): ScheduleData {
     revocable: Boolean(raw.revocable),
     revoked: Boolean(raw.revoked),
     paused: Boolean(raw.paused),
+    paused_duration: Number(raw.paused_duration ?? 0),
+    paused_at: Number(raw.paused_at ?? 0),
     requires_milestones: Boolean(raw.requires_milestones),
     vested_at_revoke: BigInt(raw.vested_at_revoke ?? raw.vested_at_revocation ?? 0),
     milestones: Array.isArray(raw.milestones)
