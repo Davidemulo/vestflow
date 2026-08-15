@@ -4244,7 +4244,7 @@ mod test {
     fn test_create_schedule_with_maximum_i128_total_amount() {
         let env = Env::default();
         env.mock_all_auths();
-        let (client, grantor, beneficiary, token_addr, token_admin) = setup(&env);
+        let (client, grantor, beneficiary, token_addr, _token_admin) = setup(&env);
 
         // Mint a very large amount to the grantor (close to i128::MAX but safe)
         let max_safe_amount: i128 = i128::MAX / 2;
@@ -4326,7 +4326,7 @@ mod test {
         let (client, _, _, _, token_admin) = setup(&env);
 
         let hash1 = wasm_hash(&env, 11);
-        let hash2 = wasm_hash(&env, 12);
+        let _hash2 = wasm_hash(&env, 12);
 
         // Step 1: Initialize upgrade authority
         set_time(&env, 1000);
