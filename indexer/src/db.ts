@@ -28,6 +28,72 @@ function ensureColumn(db: Database.Database, table: string, column: string, ddl:
   }
 }
 
+/** Recreate schedule_events when the CHECK constraint predates proposal events. */
+function migrateEventTypeCheck(db: Database.Database): void {
+  const row = db
+    .prepare(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'schedule_events'`
+    )
+    .get() as { sql: string } | undefined;
+  if (!row?.sql || row.sql.includes("proposal_created")) {
+    return;
+  }
+
+  db.exec("BEGIN");
+  try {
+    db.exec(`
+      CREATE TABLE schedule_events_new (
+        id TEXT PRIMARY KEY,
+        event_type TEXT NOT NULL CHECK (event_type IN (
+          'schedule_created',
+          'claimed',
+          'revoked',
+          'proposal_created',
+          'proposal_acknowledged',
+          'proposal_activated',
+          'proposal_expired',
+          'unknown'
+        )),
+        ledger INTEGER NOT NULL,
+        ledger_closed_at TEXT NOT NULL,
+        schedule_id INTEGER,
+        proposal_id INTEGER,
+        grantor TEXT,
+        beneficiary TEXT,
+        amount TEXT,
+        token TEXT,
+        created_amount TEXT,
+        raw_topics TEXT NOT NULL,
+        raw_value TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      );
+    `);
+    db.exec(`
+      INSERT INTO schedule_events_new (
+        id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
+        grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value, created_at
+      )
+      SELECT
+        id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
+        grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value, created_at
+      FROM schedule_events;
+    `);
+    db.exec("DROP TABLE schedule_events");
+    db.exec("ALTER TABLE schedule_events_new RENAME TO schedule_events");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_grantor ON schedule_events (grantor)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_beneficiary ON schedule_events (beneficiary)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_schedule_id ON schedule_events (schedule_id)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_proposal_id ON schedule_events (proposal_id)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_event_type ON schedule_events (event_type)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_ledger ON schedule_events (ledger)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
 export function getDb(network = parseNetwork(undefined)): Database.Database {
   let db = dbs.get(network);
   if (!db) {
@@ -40,7 +106,10 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
     db.exec(schema);
     ensureColumn(db, "schedule_events", "token", "token TEXT");
     ensureColumn(db, "schedule_events", "created_amount", "created_amount TEXT");
+    ensureColumn(db, "schedule_events", "proposal_id", "proposal_id INTEGER");
     db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_proposal_id ON schedule_events (proposal_id)");
+    migrateEventTypeCheck(db);
     dbs.set(network, db);
   }
   return db;
@@ -69,6 +138,7 @@ export interface InsertEventRow {
   ledger: number;
   ledger_closed_at: string;
   schedule_id: number | null;
+  proposal_id?: number | null;
   grantor: string | null;
   beneficiary: string | null;
   amount: string | null;
@@ -87,9 +157,9 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
   const result = getDb(network)
     .prepare(
       `INSERT OR IGNORE INTO schedule_events
-        (id, event_type, ledger, ledger_closed_at, schedule_id,
+        (id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
          grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       row.id,
@@ -97,6 +167,7 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
       row.ledger,
       row.ledger_closed_at,
       row.schedule_id,
+      row.proposal_id ?? null,
       row.grantor,
       row.beneficiary,
       row.amount,

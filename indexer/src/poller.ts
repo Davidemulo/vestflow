@@ -50,6 +50,10 @@ function inferEventType(topics: unknown[]): EventType {
   if (tag === "created") return "schedule_created";
   if (tag === "claimed") return "claimed";
   if (tag === "revoked") return "revoked";
+  if (tag === "prop_new") return "proposal_created";
+  if (tag === "prop_ack") return "proposal_acknowledged";
+  if (tag === "prop_act") return "proposal_activated";
+  if (tag === "prop_exp") return "proposal_expired";
   return "unknown";
 }
 
@@ -116,6 +120,7 @@ async function poll(): Promise<void> {
         const eventType = inferEventType(topics);
 
         let scheduleId: number | null = null;
+        let proposalId: number | null = null;
         let grantor: string | null = null;
         let beneficiary: string | null = null;
         let amount: string | null = null;
@@ -159,6 +164,37 @@ async function poll(): Promise<void> {
             token = toStr(topics[2]);
             scheduleId = valueArr[0] != null ? Number(valueArr[0]) : null;
             break;
+          case "proposal_created":
+            // topics: ["prop_new", proposal_id]
+            // value: [grantor, beneficiary, token, total_amount]
+            proposalId = topics[1] != null ? Number(topics[1]) : null;
+            grantor = toStr(valueArr[0]);
+            beneficiary = toStr(valueArr[1]);
+            token = toStr(valueArr[2]);
+            createdAmount = valueArr[3] != null ? String(valueArr[3]) : null;
+            break;
+          case "proposal_acknowledged":
+            // topics: ["prop_ack", proposal_id]
+            // value: [beneficiary, ledger]
+            proposalId = topics[1] != null ? Number(topics[1]) : null;
+            beneficiary = toStr(valueArr[0]);
+            break;
+          case "proposal_activated":
+            // topics: ["prop_act", proposal_id]
+            // value: schedule_id
+            proposalId = topics[1] != null ? Number(topics[1]) : null;
+            scheduleId = value != null && !Array.isArray(value)
+              ? Number(value)
+              : valueArr[0] != null ? Number(valueArr[0]) : null;
+            break;
+          case "proposal_expired":
+            // topics: ["prop_exp", proposal_id]
+            // value: expired_by
+            proposalId = topics[1] != null ? Number(topics[1]) : null;
+            grantor = toStr(Array.isArray(value) || (value && typeof value === "object")
+              ? valueArr[0]
+              : value);
+            break;
         }
 
         const isNew = insertEvent({
@@ -167,6 +203,7 @@ async function poll(): Promise<void> {
           ledger: raw.ledger,
           ledger_closed_at: raw.ledgerClosedAt,
           schedule_id: scheduleId,
+          proposal_id: proposalId,
           grantor,
           beneficiary,
           amount,
