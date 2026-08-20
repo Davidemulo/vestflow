@@ -21,7 +21,9 @@ import type {
   VestflowConfig,
   CreateScheduleParams,
   CreateGradedScheduleParams,
-  VestingKind,
+  ProposeScheduleParams,
+  ScheduleProposal,
+  ProposalState,
 } from "./types";
 import { xlmToStroops } from "./utils";
 
@@ -818,6 +820,163 @@ export class VestflowClient {
       ],
       signer
     );
+  }
+
+  /**
+   * Propose a vesting schedule without transferring tokens.
+   *
+   * The grantor later calls {@link fundAndActivate} within 72 hours to lock
+   * tokens and start the schedule. Beneficiary acknowledgment is optional.
+   */
+  async proposeSchedule(
+    params: ProposeScheduleParams,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    if (params.beneficiary === params.grantor) {
+      throw new Error("beneficiary must be different from grantor");
+    }
+    const totalStroops = xlmToStroops(params.totalAmountXlm);
+    const durationSecs = params.durationDays * 86400;
+    const cliffSecs = params.cliffDays * 86400;
+    const lockupSecs = (params.lockupDays ?? 0) * 86400;
+    const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(params.kind)]);
+
+    const args: xdr.ScVal[] = [
+      nativeToScVal(params.grantor, { type: "address" }),
+      nativeToScVal(params.beneficiary, { type: "address" }),
+      nativeToScVal(this.nativeToken, { type: "address" }),
+      nativeToScVal(totalStroops, { type: "i128" }),
+      nativeToScVal(params.startTime, { type: "u64" }),
+      nativeToScVal(durationSecs, { type: "u64" }),
+      nativeToScVal(cliffSecs, { type: "u64" }),
+      nativeToScVal(lockupSecs, { type: "u64" }),
+      kindVal,
+      nativeToScVal(params.revocable, { type: "bool" }),
+    ];
+    return this.buildAndSend(params.grantor, "propose_schedule", args, signer);
+  }
+
+  /**
+   * Record that the beneficiary has seen a proposal.
+   *
+   * Does not block {@link fundAndActivate}.
+   */
+  async acknowledgeProposal(
+    beneficiary: string,
+    proposalId: number,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      beneficiary,
+      "acknowledge_proposal",
+      [
+        nativeToScVal(beneficiary, { type: "address" }),
+        nativeToScVal(proposalId, { type: "u64" }),
+      ],
+      signer
+    );
+  }
+
+  /**
+   * Transfer tokens and activate a proposed schedule (grantor only).
+   *
+   * Must be called within 72 hours of {@link proposeSchedule}.
+   */
+  async fundAndActivate(
+    grantor: string,
+    proposalId: number,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      grantor,
+      "fund_and_activate",
+      [
+        nativeToScVal(grantor, { type: "address" }),
+        nativeToScVal(proposalId, { type: "u64" }),
+      ],
+      signer
+    );
+  }
+
+  /**
+   * Reclaim proposal storage after the 72-hour window. Anyone may call this.
+   */
+  async expireProposal(
+    caller: string,
+    proposalId: number,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    return this.buildAndSend(
+      caller,
+      "expire_proposal",
+      [
+        nativeToScVal(caller, { type: "address" }),
+        nativeToScVal(proposalId, { type: "u64" }),
+      ],
+      signer
+    );
+  }
+
+  /**
+   * Fetch a proposal by ID.
+   * Returns null if the proposal does not exist or has been expired and cleared.
+   */
+  async getProposal(id: number, publicKey?: string): Promise<ScheduleProposal | null> {
+    try {
+      const val = await this.simulate(
+        "get_proposal",
+        [nativeToScVal(id, { type: "u64" })],
+        publicKey
+      );
+      const native = scValToNative(val);
+      if (native == null) return null;
+      return this.parseProposal(native);
+    } catch {
+      return null;
+    }
+  }
+
+  private parseProposal(raw: Record<string, unknown>): ScheduleProposal {
+    return {
+      id: Number(raw.id ?? 0),
+      grantor: String(raw.grantor ?? ""),
+      beneficiary: String(raw.beneficiary ?? ""),
+      token: String(raw.token ?? ""),
+      total_amount: BigInt(raw.total_amount as string | number | bigint ?? 0),
+      start_time: Number(raw.start_time ?? 0),
+      duration: Number(raw.duration ?? 0),
+      cliff_duration: Number(raw.cliff_duration ?? 0),
+      lockup_duration: Number(raw.lockup_duration ?? 0),
+      kind:
+        raw.kind === "Cliff"
+          ? "Cliff"
+          : raw.kind === "LinearWithCliff"
+            ? "LinearWithCliff"
+            : "Linear",
+      revocable: Boolean(raw.revocable),
+      state: this.parseProposalState(raw.state),
+      created_at_ledger: Number(raw.created_at_ledger ?? 0),
+    };
+  }
+
+  private parseProposalState(raw: unknown): ProposalState {
+    if (raw == null) return "Pending";
+    if (typeof raw === "string") {
+      if (raw === "Acknowledged" || raw === "Expired" || raw === "Pending") {
+        return raw;
+      }
+      return "Pending";
+    }
+    if (typeof raw === "object") {
+      const obj = raw as Record<string, unknown>;
+      if ("Activated" in obj) {
+        return { tag: "Activated", scheduleId: Number(obj.Activated) };
+      }
+      if (obj.tag === "Activated") {
+        return { tag: "Activated", scheduleId: Number(obj.values ?? obj.scheduleId ?? 0) };
+      }
+    }
+    return "Pending";
   }
 
   subscribeToSchedule(
