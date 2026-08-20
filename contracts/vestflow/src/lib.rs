@@ -62,6 +62,11 @@ pub enum VestFlowError {
     ScheduleRevoked = 8,
     LockupLessThanCliff = 9,
     InvalidToken = 10,
+    ProposalNotFound = 11,
+    ProposalNotExpired = 12,
+    ProposalExpired = 13,
+    ProposalAlreadyActivated = 14,
+    ProposalNotPending = 15,
 }
 
 #[contracttype]
@@ -87,6 +92,10 @@ pub enum DataKey {
     PerformanceMilestones(u64),
     /// Oracle address authorized to attest milestones.
     PerformanceOracle,
+    /// Escrow proposal by id. Appended to avoid colliding with existing keys.
+    Proposal(u64),
+    /// Monotonic counter of proposals ever created.
+    ProposalCount,
 }
 
 /// Mandatory delay between an on-chain upgrade announcement and execution.
@@ -97,6 +106,46 @@ pub const UPGRADE_TIMELOCK_SECONDS: u64 = 48 * 60 * 60;
 pub const INSTANCE_TTL_THRESHOLD_LEDGERS: u32 = 120_960;
 /// Ledgers to extend the instance TTL to when bumped (~30 days at ~5s/ledger).
 pub const INSTANCE_TTL_EXTEND_TO_LEDGERS: u32 = 518_400;
+
+/// Deposit window for escrow proposals, in ledgers.
+///
+/// 72 hours at the 10s/ledger rate used by the spec (~25,920 ledgers).
+/// Enforced in contract logic via `created_at_ledger`; instance storage TTL is
+/// shared with every schedule and is bumped with the existing instance constants.
+pub const PROPOSAL_WINDOW_LEDGERS: u32 = 25_920;
+
+/// Lifecycle of an escrow schedule proposal.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalState {
+    /// Parameters locked; tokens have not been transferred.
+    Pending,
+    /// Beneficiary has acknowledged on-chain. Activation is still optional.
+    Acknowledged,
+    /// Grantor funded the proposal. Inner value is the created schedule id.
+    Activated(u64),
+    /// Past the 72-hour window. Not persisted: `expire_proposal` removes the key.
+    Expired,
+}
+
+/// Parameters and status of a two-phase escrow proposal.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScheduleProposal {
+    pub id: u64,
+    pub grantor: Address,
+    pub beneficiary: Address,
+    pub token: Address,
+    pub total_amount: i128,
+    pub start_time: u64,
+    pub duration: u64,
+    pub cliff_duration: u64,
+    pub lockup_duration: u64,
+    pub kind: VestingKind,
+    pub revocable: bool,
+    pub state: ProposalState,
+    pub created_at_ledger: u32,
+}
 
 /// A contract WASM upgrade that has been announced on-chain but not yet executed.
 #[contracttype]
@@ -765,18 +814,6 @@ impl VestFlowContract {
             "Start time cannot be in the past"
         );
 
-        let count: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ScheduleCount)
-            .unwrap_or(0);
-        // Schedule IDs are derived from a monotonic counter that is read,
-        // incremented, and written atomically within a single transaction.
-        // Soroban's single-threaded execution model guarantees no two
-        // transactions in the same ledger can observe the same counter value,
-        // so schedule ID collisions are impossible.
-        let id = count + 1;
-
         // Validate token is a recognised SAC before pulling funds.
         validate_token_sac(&env, &token)?;
 
@@ -784,73 +821,236 @@ impl VestFlowContract {
         let contract_address = env.current_contract_address();
         token::Client::new(&env, &token).transfer(&grantor, &contract_address, &total_amount);
 
-        let schedule = VestingSchedule {
+        Ok(persist_funded_schedule(
+            &env,
+            grantor,
+            beneficiary,
+            token,
+            total_amount,
+            start_time,
+            duration,
+            cliff_duration,
+            lockup_duration,
+            kind,
+            revocable,
+        ))
+    }
+
+    /// Lock schedule parameters without transferring tokens.
+    ///
+    /// The grantor later calls [`fund_and_activate`] within
+    /// [`PROPOSAL_WINDOW_LEDGERS`] to move funds and start the schedule.
+    /// Acknowledgment by the beneficiary is optional and auditable.
+    pub fn propose_schedule(
+        env: Env,
+        grantor: Address,
+        beneficiary: Address,
+        token: Address,
+        total_amount: i128,
+        start_time: u64,
+        duration: u64,
+        cliff_duration: u64,
+        lockup_duration: u64,
+        kind: VestingKind,
+        revocable: bool,
+    ) -> Result<u64, VestFlowError> {
+        grantor.require_auth();
+        Self::check_storage_headroom(&env)?;
+
+        assert!(
+            beneficiary != grantor,
+            "Beneficiary must differ from grantor"
+        );
+        if total_amount <= 0 {
+            return Err(VestFlowError::AmountZero);
+        }
+        if duration == 0 {
+            return Err(VestFlowError::DurationZero);
+        }
+        if duration < 60 {
+            panic!("Duration must be at least 60 seconds");
+        }
+        if cliff_duration > duration {
+            return Err(VestFlowError::CliffExceedsDuration);
+        }
+        assert!(
+            lockup_duration >= cliff_duration,
+            "Lockup cannot be less than cliff"
+        );
+        assert!(
+            start_time >= env.ledger().timestamp(),
+            "Start time cannot be in the past"
+        );
+        validate_token_sac(&env, &token)?;
+
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ProposalCount)
+            .unwrap_or(0);
+        let id = count + 1;
+
+        let proposal = ScheduleProposal {
             id,
             grantor: grantor.clone(),
             beneficiary: beneficiary.clone(),
             token: token.clone(),
             total_amount,
-            claimed_amount: 0,
             start_time,
-            duration_seconds: duration,
-            cliff_seconds: cliff_duration,
+            duration,
+            cliff_duration,
             lockup_duration,
-            kind: kind.clone(),
+            kind,
             revocable,
-            revoked: false,
-            vested_at_revoke: 0,
-            paused: false,
-            paused_duration: 0,
-            paused_at: 0,
-            requires_milestones: false,
-            milestones: vec![&env],
+            state: ProposalState::Pending,
+            created_at_ledger: env.ledger().sequence(),
         };
 
         env.storage()
             .instance()
-            .set(&DataKey::Schedule(id), &schedule);
-        env.storage().instance().set(&DataKey::ScheduleCount, &id);
-
-        // Maintain grantor schedule index
-        let mut grantor_ids: Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&DataKey::GrantorSchedules(grantor.clone()))
-            .unwrap_or(vec![&env]);
-        grantor_ids.push_back(id);
-        env.storage()
-            .instance()
-            .set(&DataKey::GrantorSchedules(grantor.clone()), &grantor_ids);
-
-        // Maintain beneficiary schedule index
-        let mut beneficiary_ids: Vec<u64> = env
-            .storage()
-            .instance()
-            .get(&DataKey::BeneficiarySchedules(beneficiary.clone()))
-            .unwrap_or(vec![&env]);
-        beneficiary_ids.push_back(id);
-        env.storage().instance().set(
-            &DataKey::BeneficiarySchedules(beneficiary.clone()),
-            &beneficiary_ids,
+            .set(&DataKey::Proposal(id), &proposal);
+        env.storage().instance().set(&DataKey::ProposalCount, &id);
+        env.storage().instance().extend_ttl(
+            INSTANCE_TTL_THRESHOLD_LEDGERS,
+            INSTANCE_TTL_EXTEND_TO_LEDGERS,
         );
 
         env.events().publish(
-            (symbol_short!("created"), id),
-            (
-                grantor,
-                beneficiary,
-                token,
-                total_amount,
-                start_time,
-                duration,
-                cliff_duration,
-                lockup_duration,
-                kind,
-                revocable,
-            ),
+            (symbol_short!("prop_new"), id),
+            (grantor, beneficiary, token, total_amount),
         );
 
         Ok(id)
+    }
+
+    /// Record that the beneficiary has seen the proposal.
+    ///
+    /// Does not block [`fund_and_activate`]. Idempotent if already acknowledged.
+    pub fn acknowledge_proposal(
+        env: Env,
+        beneficiary: Address,
+        proposal_id: u64,
+    ) -> Result<(), VestFlowError> {
+        beneficiary.require_auth();
+        let mut proposal = load_proposal(&env, proposal_id)?;
+        assert!(beneficiary == proposal.beneficiary, "Not the beneficiary");
+
+        match proposal.state {
+            ProposalState::Activated(_) => Err(VestFlowError::ProposalAlreadyActivated),
+            ProposalState::Expired => Err(VestFlowError::ProposalExpired),
+            ProposalState::Acknowledged => Ok(()),
+            ProposalState::Pending => {
+                proposal.state = ProposalState::Acknowledged;
+                env.storage()
+                    .instance()
+                    .set(&DataKey::Proposal(proposal_id), &proposal);
+                env.events().publish(
+                    (symbol_short!("prop_ack"), proposal_id),
+                    (beneficiary, env.ledger().sequence()),
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Transfer tokens and create the schedule from a pending proposal.
+    ///
+    /// Acknowledgment is optional. Fails if the 72-hour window has elapsed
+    /// or if the proposal was already activated. `start_time` is taken from
+    /// the frozen proposal and is not re-checked against the current ledger
+    /// time, so a proposal created with `start_time = now` remains fundable.
+    pub fn fund_and_activate(
+        env: Env,
+        grantor: Address,
+        proposal_id: u64,
+    ) -> Result<u64, VestFlowError> {
+        grantor.require_auth();
+        let mut proposal = load_proposal(&env, proposal_id)?;
+        assert!(grantor == proposal.grantor, "Not the grantor");
+
+        if let ProposalState::Activated(_) = proposal.state {
+            return Err(VestFlowError::ProposalAlreadyActivated);
+        }
+        if matches!(proposal.state, ProposalState::Expired) {
+            return Err(VestFlowError::ProposalExpired);
+        }
+
+        let deadline = proposal
+            .created_at_ledger
+            .saturating_add(PROPOSAL_WINDOW_LEDGERS);
+        if env.ledger().sequence() >= deadline {
+            return Err(VestFlowError::ProposalExpired);
+        }
+
+        let contract_address = env.current_contract_address();
+        token::Client::new(&env, &proposal.token).transfer(
+            &grantor,
+            &contract_address,
+            &proposal.total_amount,
+        );
+
+        let schedule_id = persist_funded_schedule(
+            &env,
+            proposal.grantor.clone(),
+            proposal.beneficiary.clone(),
+            proposal.token.clone(),
+            proposal.total_amount,
+            proposal.start_time,
+            proposal.duration,
+            proposal.cliff_duration,
+            proposal.lockup_duration,
+            proposal.kind.clone(),
+            proposal.revocable,
+        );
+
+        proposal.state = ProposalState::Activated(schedule_id);
+        env.storage()
+            .instance()
+            .set(&DataKey::Proposal(proposal_id), &proposal);
+
+        env.events()
+            .publish((symbol_short!("prop_act"), proposal_id), schedule_id);
+
+        Ok(schedule_id)
+    }
+
+    /// Reclaim proposal storage after the 72-hour window.
+    ///
+    /// Anyone who authorizes the call may expire an unactivated proposal.
+    /// Activated proposals are kept so [`get_proposal`] remains auditable.
+    pub fn expire_proposal(
+        env: Env,
+        caller: Address,
+        proposal_id: u64,
+    ) -> Result<(), VestFlowError> {
+        caller.require_auth();
+        let proposal = load_proposal(&env, proposal_id)?;
+
+        if let ProposalState::Activated(_) = proposal.state {
+            return Err(VestFlowError::ProposalAlreadyActivated);
+        }
+
+        let deadline = proposal
+            .created_at_ledger
+            .saturating_add(PROPOSAL_WINDOW_LEDGERS);
+        if env.ledger().sequence() < deadline {
+            return Err(VestFlowError::ProposalNotExpired);
+        }
+
+        env.storage()
+            .instance()
+            .remove(&DataKey::Proposal(proposal_id));
+        env.events()
+            .publish((symbol_short!("prop_exp"), proposal_id), caller);
+
+        Ok(())
+    }
+
+    /// Return a proposal by id, or `None` if it was never created or expired.
+    pub fn get_proposal(env: Env, proposal_id: u64) -> Option<ScheduleProposal> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Proposal(proposal_id))
     }
 
     /// Create a new graded (percentage-based) vesting schedule.
@@ -2293,6 +2493,109 @@ impl VestFlowContract {
             (schedule.grantor, schedule.beneficiary, schedule.token),
         );
     }
+}
+
+fn load_proposal(env: &Env, proposal_id: u64) -> Result<ScheduleProposal, VestFlowError> {
+    env.storage()
+        .instance()
+        .get(&DataKey::Proposal(proposal_id))
+        .ok_or(VestFlowError::ProposalNotFound)
+}
+
+/// Persist a funded vesting schedule and emit the `created` event.
+///
+/// Caller must have already authorized the grantor, validated parameters,
+/// and transferred `total_amount` into the contract.
+fn persist_funded_schedule(
+    env: &Env,
+    grantor: Address,
+    beneficiary: Address,
+    token: Address,
+    total_amount: i128,
+    start_time: u64,
+    duration: u64,
+    cliff_duration: u64,
+    lockup_duration: u64,
+    kind: VestingKind,
+    revocable: bool,
+) -> u64 {
+    let count: u64 = env
+        .storage()
+        .instance()
+        .get(&DataKey::ScheduleCount)
+        .unwrap_or(0);
+    // Schedule IDs are derived from a monotonic counter that is read,
+    // incremented, and written atomically within a single transaction.
+    // Soroban's single-threaded execution model guarantees no two
+    // transactions in the same ledger can observe the same counter value,
+    // so schedule ID collisions are impossible.
+    let id = count + 1;
+
+    let schedule = VestingSchedule {
+        id,
+        grantor: grantor.clone(),
+        beneficiary: beneficiary.clone(),
+        token: token.clone(),
+        total_amount,
+        claimed_amount: 0,
+        start_time,
+        duration_seconds: duration,
+        cliff_seconds: cliff_duration,
+        lockup_duration,
+        kind: kind.clone(),
+        revocable,
+        revoked: false,
+        vested_at_revoke: 0,
+        paused: false,
+        paused_duration: 0,
+        paused_at: 0,
+        requires_milestones: false,
+        milestones: vec![&env],
+    };
+
+    env.storage()
+        .instance()
+        .set(&DataKey::Schedule(id), &schedule);
+    env.storage().instance().set(&DataKey::ScheduleCount, &id);
+
+    let mut grantor_ids: Vec<u64> = env
+        .storage()
+        .instance()
+        .get(&DataKey::GrantorSchedules(grantor.clone()))
+        .unwrap_or(vec![&env]);
+    grantor_ids.push_back(id);
+    env.storage()
+        .instance()
+        .set(&DataKey::GrantorSchedules(grantor.clone()), &grantor_ids);
+
+    let mut beneficiary_ids: Vec<u64> = env
+        .storage()
+        .instance()
+        .get(&DataKey::BeneficiarySchedules(beneficiary.clone()))
+        .unwrap_or(vec![&env]);
+    beneficiary_ids.push_back(id);
+    env.storage().instance().set(
+        &DataKey::BeneficiarySchedules(beneficiary.clone()),
+        &beneficiary_ids,
+    );
+
+    env.events().publish(
+        (symbol_short!("created"), id),
+        (
+            grantor,
+            beneficiary,
+            token,
+            total_amount,
+            start_time,
+            duration,
+            cliff_duration,
+            lockup_duration,
+            kind,
+            revocable,
+        ),
+    );
+
+    id
 }
 
 /// Validate that `token` is a recognised Stellar Asset Contract (SAC) by
@@ -4495,5 +4798,377 @@ mod test {
 
         // Any time after must also equal total_amount (caps, never exceeds).
         assert_eq!(schedule.vested_at(end_time + 1_000), total_amount);
+    }
+
+    fn set_sequence(env: &Env, sequence_number: u32) {
+        env.ledger().set(LedgerInfo {
+            timestamp: env.ledger().timestamp(),
+            protocol_version: 22,
+            sequence_number,
+            network_id: Default::default(),
+            base_reserve: 10,
+            min_temp_entry_ttl: 10,
+            min_persistent_entry_ttl: 10,
+            max_entry_ttl: 3110400,
+        });
+    }
+
+    fn propose_linear(
+        _env: &Env,
+        client: &VestFlowContractClient<'_>,
+        grantor: &Address,
+        beneficiary: &Address,
+        token: &Address,
+        amount: i128,
+        start_time: u64,
+    ) -> u64 {
+        client.propose_schedule(
+            grantor,
+            beneficiary,
+            token,
+            &amount,
+            &start_time,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        )
+    }
+
+    #[test]
+    fn test_propose_acknowledge_fund_happy_path() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        set_time(&env, 1000);
+        let grantor_before = token.balance(&grantor);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.state, ProposalState::Pending);
+        assert_eq!(proposal.grantor, grantor);
+        assert_eq!(proposal.beneficiary, beneficiary);
+        assert_eq!(proposal.total_amount, 1000);
+        assert_eq!(token.balance(&grantor), grantor_before);
+
+        client.acknowledge_proposal(&beneficiary, &proposal_id);
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.state, ProposalState::Acknowledged);
+
+        let schedule_id = client.fund_and_activate(&grantor, &proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Activated(schedule_id)
+        );
+        let schedule = client.get_schedule(&schedule_id);
+        assert_eq!(schedule.grantor, grantor);
+        assert_eq!(schedule.beneficiary, beneficiary);
+        assert_eq!(schedule.total_amount, 1000);
+        assert_eq!(token.balance(&grantor), grantor_before - 1000);
+        assert_eq!(token.balance(&client.address), 1000);
+    }
+
+    #[test]
+    fn test_expire_proposal_clears_storage_after_window() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let caller = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let created = client.get_proposal(&proposal_id).unwrap().created_at_ledger;
+
+        set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS + 1);
+        client.expire_proposal(&caller, &proposal_id);
+        assert!(client.get_proposal(&proposal_id).is_none());
+    }
+
+    #[test]
+    fn test_expire_proposal_rejects_before_window() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let caller = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let created = client.get_proposal(&proposal_id).unwrap().created_at_ledger;
+
+        set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS - 1);
+        let result = client.try_expire_proposal(&caller, &proposal_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::ProposalNotExpired
+        );
+        assert!(client.get_proposal(&proposal_id).is_some());
+    }
+
+    #[test]
+    fn test_fund_and_activate_rejects_double_activation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        client.fund_and_activate(&grantor, &proposal_id);
+
+        let result = client.try_fund_and_activate(&grantor, &proposal_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::ProposalAlreadyActivated
+        );
+    }
+
+    #[test]
+    fn test_fund_and_activate_without_ack_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Pending
+        );
+        let schedule_id = client.fund_and_activate(&grantor, &proposal_id);
+        assert_eq!(client.get_schedule(&schedule_id).total_amount, 1000);
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Activated(schedule_id)
+        );
+    }
+
+    #[test]
+    fn test_fund_and_activate_rejects_after_window() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let created = client.get_proposal(&proposal_id).unwrap().created_at_ledger;
+
+        set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS);
+        let result = client.try_fund_and_activate(&grantor, &proposal_id);
+        assert_eq!(result.unwrap_err().unwrap(), VestFlowError::ProposalExpired);
+    }
+
+    #[test]
+    #[should_panic(expected = "Not the grantor")]
+    fn test_fund_and_activate_rejects_non_grantor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        client.fund_and_activate(&attacker, &proposal_id);
+    }
+
+    #[test]
+    fn test_expire_then_fund_at_window_expire_wins() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let caller = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let created = client.get_proposal(&proposal_id).unwrap().created_at_ledger;
+
+        set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS);
+        client.expire_proposal(&caller, &proposal_id);
+        let result = client.try_fund_and_activate(&grantor, &proposal_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::ProposalNotFound
+        );
+        assert!(client.get_proposal(&proposal_id).is_none());
+    }
+
+    #[test]
+    fn test_fund_then_expire_in_window_fund_wins() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let caller = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let schedule_id = client.fund_and_activate(&grantor, &proposal_id);
+
+        let result = client.try_expire_proposal(&caller, &proposal_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::ProposalAlreadyActivated
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Activated(schedule_id)
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Not the beneficiary")]
+    fn test_acknowledge_proposal_rejects_non_beneficiary() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let attacker = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        client.acknowledge_proposal(&attacker, &proposal_id);
+    }
+
+    #[test]
+    fn test_get_proposal_lifecycle_states() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        assert!(client.get_proposal(&1).is_none());
+
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Pending
+        );
+
+        client.acknowledge_proposal(&beneficiary, &proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Acknowledged
+        );
+
+        let schedule_id = client.fund_and_activate(&grantor, &proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Activated(schedule_id)
+        );
+    }
+
+    #[test]
+    fn test_fund_and_activate_after_expire_proposal_is_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let caller = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let created = client.get_proposal(&proposal_id).unwrap().created_at_ledger;
+        set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS + 1);
+        client.expire_proposal(&caller, &proposal_id);
+
+        let result = client.try_fund_and_activate(&grantor, &proposal_id);
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::ProposalNotFound
+        );
     }
 }
