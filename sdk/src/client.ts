@@ -899,7 +899,8 @@ export class VestflowClient {
   }
 
   /**
-   * Reclaim proposal storage after the 72-hour window. Anyone may call this.
+   * Mark a proposal as expired after the 72-hour window. Anyone may call this.
+   * The proposal remains queryable with state `Expired`.
    */
   async expireProposal(
     caller: string,
@@ -919,7 +920,8 @@ export class VestflowClient {
 
   /**
    * Fetch a proposal by ID.
-   * Returns null if the proposal does not exist or has been expired and cleared.
+   * Returns null if the proposal was never created. Expired proposals are
+   * returned with state `Expired`.
    */
   async getProposal(id: number, publicKey?: string): Promise<ScheduleProposal | null> {
     try {

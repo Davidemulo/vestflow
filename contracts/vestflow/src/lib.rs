@@ -66,7 +66,7 @@ pub enum VestFlowError {
     ProposalNotExpired = 12,
     ProposalExpired = 13,
     ProposalAlreadyActivated = 14,
-    ProposalNotPending = 15,
+    DurationTooShort = 15,
 }
 
 #[contracttype]
@@ -124,7 +124,7 @@ pub enum ProposalState {
     Acknowledged,
     /// Grantor funded the proposal. Inner value is the created schedule id.
     Activated(u64),
-    /// Past the 72-hour window. Not persisted: `expire_proposal` removes the key.
+    /// Past the 72-hour window. Written by [`VestFlowContract::expire_proposal`].
     Expired,
 }
 
@@ -765,8 +765,8 @@ impl VestFlowContract {
     /// # Errors
     ///
     /// Panics with `"Amount must be positive"` if `total_amount` ≤ 0.
-    /// Panics with `"Duration must be positive"` if `duration` = 0.
-    /// Panics with `"Duration must be at least 60 seconds"` if `duration` < 60.
+    /// Returns `DurationZero` if `duration` = 0.
+    /// Returns `DurationTooShort` if `0 < duration` < 60.
     /// Panics with `"Cliff cannot exceed duration"` if `cliff_duration` > `duration`.
     /// Panics with `"Lockup cannot be less than cliff"` if `lockup_duration` < `cliff_duration`.
     /// Panics with `"Beneficiary must differ from grantor"` if `beneficiary == grantor`.
@@ -796,12 +796,7 @@ impl VestFlowContract {
         if total_amount <= 0 {
             return Err(VestFlowError::AmountZero);
         }
-        if duration == 0 {
-            return Err(VestFlowError::DurationZero);
-        }
-        if duration < 60 {
-            panic!("Duration must be at least 60 seconds");
-        }
+        validate_duration(duration)?;
         if cliff_duration > duration {
             return Err(VestFlowError::CliffExceedsDuration);
         }
@@ -841,6 +836,13 @@ impl VestFlowContract {
     /// The grantor later calls [`fund_and_activate`] within
     /// [`PROPOSAL_WINDOW_LEDGERS`] to move funds and start the schedule.
     /// Acknowledgment by the beneficiary is optional and auditable.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AmountZero` if `total_amount` ≤ 0.
+    /// Returns `DurationZero` if `duration` = 0.
+    /// Returns `DurationTooShort` if `0 < duration` < 60.
+    /// Returns `CliffExceedsDuration` if `cliff_duration` > `duration`.
     pub fn propose_schedule(
         env: Env,
         grantor: Address,
@@ -864,12 +866,7 @@ impl VestFlowContract {
         if total_amount <= 0 {
             return Err(VestFlowError::AmountZero);
         }
-        if duration == 0 {
-            return Err(VestFlowError::DurationZero);
-        }
-        if duration < 60 {
-            panic!("Duration must be at least 60 seconds");
-        }
+        validate_duration(duration)?;
         if cliff_duration > duration {
             return Err(VestFlowError::CliffExceedsDuration);
         }
@@ -1014,20 +1011,26 @@ impl VestFlowContract {
         Ok(schedule_id)
     }
 
-    /// Reclaim proposal storage after the 72-hour window.
+    /// Mark an unactivated proposal as expired after the 72-hour window.
     ///
     /// Anyone who authorizes the call may expire an unactivated proposal.
-    /// Activated proposals are kept so [`get_proposal`] remains auditable.
+    /// The proposal remains readable via [`get_proposal`] with
+    /// [`ProposalState::Expired`]. Activated proposals are kept so they
+    /// remain auditable. Calling this on an already expired proposal is a
+    /// no-op.
     pub fn expire_proposal(
         env: Env,
         caller: Address,
         proposal_id: u64,
     ) -> Result<(), VestFlowError> {
         caller.require_auth();
-        let proposal = load_proposal(&env, proposal_id)?;
+        let mut proposal = load_proposal(&env, proposal_id)?;
 
         if let ProposalState::Activated(_) = proposal.state {
             return Err(VestFlowError::ProposalAlreadyActivated);
+        }
+        if matches!(proposal.state, ProposalState::Expired) {
+            return Ok(());
         }
 
         let deadline = proposal
@@ -1037,16 +1040,17 @@ impl VestFlowContract {
             return Err(VestFlowError::ProposalNotExpired);
         }
 
+        proposal.state = ProposalState::Expired;
         env.storage()
             .instance()
-            .remove(&DataKey::Proposal(proposal_id));
+            .set(&DataKey::Proposal(proposal_id), &proposal);
         env.events()
             .publish((symbol_short!("prop_exp"), proposal_id), caller);
 
         Ok(())
     }
 
-    /// Return a proposal by id, or `None` if it was never created or expired.
+    /// Return a proposal by id, or `None` if it was never created.
     pub fn get_proposal(env: Env, proposal_id: u64) -> Option<ScheduleProposal> {
         env.storage()
             .instance()
@@ -2500,6 +2504,16 @@ fn load_proposal(env: &Env, proposal_id: u64) -> Result<ScheduleProposal, VestFl
         .instance()
         .get(&DataKey::Proposal(proposal_id))
         .ok_or(VestFlowError::ProposalNotFound)
+}
+
+fn validate_duration(duration: u64) -> Result<(), VestFlowError> {
+    if duration == 0 {
+        return Err(VestFlowError::DurationZero);
+    }
+    if duration < 60 {
+        return Err(VestFlowError::DurationTooShort);
+    }
+    Ok(())
 }
 
 /// Persist a funded vesting schedule and emit the `created` event.
@@ -4880,7 +4894,7 @@ mod test {
     }
 
     #[test]
-    fn test_expire_proposal_clears_storage_after_window() {
+    fn test_expire_proposal_marks_expired_after_window() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, grantor, beneficiary, token_addr, _) = setup(&env);
@@ -4900,7 +4914,10 @@ mod test {
 
         set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS + 1);
         client.expire_proposal(&caller, &proposal_id);
-        assert!(client.get_proposal(&proposal_id).is_none());
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Expired
+        );
     }
 
     #[test]
@@ -5050,11 +5067,11 @@ mod test {
         set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS);
         client.expire_proposal(&caller, &proposal_id);
         let result = client.try_fund_and_activate(&grantor, &proposal_id);
+        assert_eq!(result.unwrap_err().unwrap(), VestFlowError::ProposalExpired);
         assert_eq!(
-            result.unwrap_err().unwrap(),
-            VestFlowError::ProposalNotFound
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Expired
         );
-        assert!(client.get_proposal(&proposal_id).is_none());
     }
 
     #[test]
@@ -5142,10 +5159,28 @@ mod test {
             client.get_proposal(&proposal_id).unwrap().state,
             ProposalState::Activated(schedule_id)
         );
+
+        let expired_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let created = client.get_proposal(&expired_id).unwrap().created_at_ledger;
+        set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS + 1);
+        client.expire_proposal(&Address::generate(&env), &expired_id);
+        assert_eq!(
+            client.get_proposal(&expired_id).unwrap().state,
+            ProposalState::Expired
+        );
+        assert!(client.get_proposal(&99).is_none());
     }
 
     #[test]
-    fn test_fund_and_activate_after_expire_proposal_is_not_found() {
+    fn test_fund_and_activate_after_expire_returns_proposal_expired() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, grantor, beneficiary, token_addr, _) = setup(&env);
@@ -5166,9 +5201,157 @@ mod test {
         client.expire_proposal(&caller, &proposal_id);
 
         let result = client.try_fund_and_activate(&grantor, &proposal_id);
+        assert_eq!(result.unwrap_err().unwrap(), VestFlowError::ProposalExpired);
+    }
+
+    #[test]
+    fn test_propose_schedule_rejects_duration_too_short() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        let result = client.try_propose_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &1000,
+            &30,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
         assert_eq!(
             result.unwrap_err().unwrap(),
-            VestFlowError::ProposalNotFound
+            VestFlowError::DurationTooShort
+        );
+    }
+
+    #[test]
+    fn test_propose_schedule_rejects_duration_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        let result = client.try_propose_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &1000,
+            &0,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), VestFlowError::DurationZero);
+    }
+
+    #[test]
+    fn test_create_schedule_rejects_duration_too_short() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 1000);
+        let result = client.try_create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &1000,
+            &30,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            VestFlowError::DurationTooShort
+        );
+    }
+
+    #[test]
+    fn test_expire_proposal_persists_expired_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let caller = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let created = client.get_proposal(&proposal_id).unwrap().created_at_ledger;
+        set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS + 1);
+        client.expire_proposal(&caller, &proposal_id);
+
+        let proposal = client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.state, ProposalState::Expired);
+        assert_eq!(proposal.grantor, grantor);
+        assert_eq!(proposal.beneficiary, beneficiary);
+    }
+
+    #[test]
+    fn test_acknowledge_after_expire_returns_proposal_expired() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let caller = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let created = client.get_proposal(&proposal_id).unwrap().created_at_ledger;
+        set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS + 1);
+        client.expire_proposal(&caller, &proposal_id);
+
+        let result = client.try_acknowledge_proposal(&beneficiary, &proposal_id);
+        assert_eq!(result.unwrap_err().unwrap(), VestFlowError::ProposalExpired);
+    }
+
+    #[test]
+    fn test_expire_proposal_is_idempotent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let caller = Address::generate(&env);
+
+        set_time(&env, 1000);
+        let proposal_id = propose_linear(
+            &env,
+            &client,
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            1000,
+            1000,
+        );
+        let created = client.get_proposal(&proposal_id).unwrap().created_at_ledger;
+        set_sequence(&env, created + PROPOSAL_WINDOW_LEDGERS + 1);
+        client.expire_proposal(&caller, &proposal_id);
+        client.expire_proposal(&caller, &proposal_id);
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().state,
+            ProposalState::Expired
         );
     }
 }
