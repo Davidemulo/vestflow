@@ -107,7 +107,12 @@ export function parseContractError(e: Error): string {
     return "This vesting schedule has already ended.";
   if (msg.includes("Start time in the past"))
     return "The start time must be in the future.";
-  if (msg.includes("Duration too short"))
+  if (
+    msg.includes("Duration too short") ||
+    msg.includes("DurationTooShort") ||
+    msg.includes("Contract error: 15") ||
+    msg.includes("Contract, #15")
+  )
     return "The vesting duration is too short.";
   if (msg.includes("Beneficiary must differ from grantor"))
     return "The beneficiary must be a different address from the grantor.";

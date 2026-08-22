@@ -548,10 +548,11 @@ export function parseContractError(e: Error): string {
   if (msg.includes("Contract error: 6") || msg.includes("Contract, #6") || msg.includes("DurationZero")) return "Duration must be greater than zero.";
   if (msg.includes("Contract error: 7") || msg.includes("Contract, #7") || msg.includes("Cliff exceeds duration")) return "The cliff duration cannot exceed the total duration.";
   if (msg.includes("Contract error: 8") || msg.includes("Contract, #8") || msg.includes("Schedule has been revoked")) return "This schedule was revoked.";
+  if (msg.includes("Contract error: 15") || msg.includes("Contract, #15") || msg.includes("DurationTooShort")) return "Duration must be at least 60 seconds.";
 
   if (msg.includes("Schedule not found")) return "Schedule not found.";
   if (msg.includes("Not authorized")) return "Not authorized to perform this action.";
-  if (msg.includes("Duration too short")) return "Duration must be greater than zero.";
+  if (msg.includes("Duration too short")) return "Duration must be at least 60 seconds.";
   if (msg.includes("Not the grantor")) return "Only the grantor can perform this action.";
   if (msg.includes("Not the beneficiary")) return "Only the beneficiary can claim tokens.";
   if (msg.includes("Insufficient balance")) return "Insufficient balance to complete this action.";

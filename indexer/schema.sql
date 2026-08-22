@@ -5,12 +5,22 @@ CREATE TABLE IF NOT EXISTS schedule_events (
   -- Stellar-assigned event ID: "<ledger>-<txIndex>-<eventIndex>"
   id TEXT PRIMARY KEY,
 
-  event_type TEXT NOT NULL CHECK (event_type IN ('schedule_created', 'claimed', 'revoked', 'unknown')),
+  event_type TEXT NOT NULL CHECK (event_type IN (
+    'schedule_created',
+    'claimed',
+    'revoked',
+    'proposal_created',
+    'proposal_acknowledged',
+    'proposal_activated',
+    'proposal_expired',
+    'unknown'
+  )),
 
   ledger            INTEGER NOT NULL,
   ledger_closed_at  TEXT    NOT NULL, -- ISO 8601 (from Stellar RPC)
 
   schedule_id INTEGER,    -- parsed from topic[1]
+  proposal_id INTEGER,    -- parsed from topic[1] for proposal_* events
   grantor     TEXT,       -- parsed from topic[2] for schedule_created / revoked
   beneficiary TEXT,       -- parsed from topic[2] for claimed; topic[3] for created
   amount      TEXT,       -- bigint as decimal string (claimed events only)
@@ -26,6 +36,7 @@ CREATE TABLE IF NOT EXISTS schedule_events (
 CREATE INDEX IF NOT EXISTS idx_grantor      ON schedule_events (grantor);
 CREATE INDEX IF NOT EXISTS idx_beneficiary  ON schedule_events (beneficiary);
 CREATE INDEX IF NOT EXISTS idx_schedule_id  ON schedule_events (schedule_id);
+CREATE INDEX IF NOT EXISTS idx_proposal_id  ON schedule_events (proposal_id);
 CREATE INDEX IF NOT EXISTS idx_event_type   ON schedule_events (event_type);
 CREATE INDEX IF NOT EXISTS idx_ledger       ON schedule_events (ledger);
 CREATE INDEX IF NOT EXISTS idx_token        ON schedule_events (token);

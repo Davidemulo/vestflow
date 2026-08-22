@@ -1,6 +1,14 @@
 import type { NetworkName } from "./config";
 
-export type EventType = "schedule_created" | "claimed" | "revoked" | "unknown";
+export type EventType =
+  | "schedule_created"
+  | "claimed"
+  | "revoked"
+  | "proposal_created"
+  | "proposal_acknowledged"
+  | "proposal_activated"
+  | "proposal_expired"
+  | "unknown";
 
 /** A single indexed contract event row. */
 export interface IndexedEvent {
@@ -9,6 +17,8 @@ export interface IndexedEvent {
   ledger: number;
   ledger_closed_at: string;
   schedule_id: number | null;
+  /** Proposal id for escrow proposal events; null/absent for schedule events. */
+  proposal_id?: number | null;
   grantor: string | null;
   beneficiary: string | null;
   /** Claimed amount as a decimal string (bigint); null for non-claim events. */

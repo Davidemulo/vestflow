@@ -137,6 +137,43 @@ export interface GradedMilestone {
 }
 
 /**
+ * Lifecycle of an escrow schedule proposal.
+ * Mirrors the ProposalState enum in the Soroban contract.
+ */
+export type ProposalState =
+  | "Pending"
+  | "Acknowledged"
+  | { tag: "Activated"; scheduleId: number }
+  | "Expired";
+
+/**
+ * A two-phase escrow proposal returned from the contract.
+ */
+export interface ScheduleProposal {
+  id: number;
+  grantor: string;
+  beneficiary: string;
+  token: string;
+  total_amount: bigint;
+  start_time: number;
+  duration: number;
+  cliff_duration: number;
+  lockup_duration: number;
+  kind: VestingKind;
+  revocable: boolean;
+  state: ProposalState;
+  created_at_ledger: number;
+}
+
+/**
+ * Parameters for proposing a vesting schedule without transferring tokens.
+ */
+export interface ProposeScheduleParams extends CreateScheduleParams {
+  /** Lockup duration in days. Defaults to 0. Must be >= cliffDays. */
+  lockupDays?: number;
+}
+
+/**
  * Parameters for creating a new graded (percentage-based) vesting schedule.
  */
 export interface CreateGradedScheduleParams {
