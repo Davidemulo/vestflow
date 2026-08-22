@@ -60,6 +60,12 @@ total_amount: i128;
 }
 
 /**
+ * Storage keys for claim delegations, keyed separately from [`DataKey`] so
+ * delegation records don't crowd the schedule key space.
+ */
+export type DelegationKey = {tag: "Delegation", values: readonly [u64, u32]} | {tag: "DelegationCount", values: readonly [u64]} | {tag: "ActiveDelegationCount", values: readonly [u64]};
+
+/**
  * Lifecycle of an escrow schedule proposal.
  */
 export type ProposalState = {tag: "Pending", values: void} | {tag: "Acknowledged", values: void} | {tag: "Activated", values: readonly [u64]} | {tag: "Expired", values: void};
@@ -79,7 +85,18 @@ export const VestFlowError = {
   12: {message:"ProposalNotExpired"},
   13: {message:"ProposalExpired"},
   14: {message:"ProposalAlreadyActivated"},
-  15: {message:"DurationTooShort"}
+  15: {message:"DurationTooShort"},
+  16: {message:"DelegationNotFound"},
+  17: {message:"DelegationRevoked"},
+  18: {message:"DelegationExpired"},
+  19: {message:"DelegationExhausted"},
+  20: {message:"NotDelegate"},
+  21: {message:"TooManyDelegations"},
+  22: {message:"MergeTypeMismatch"},
+  23: {message:"MergeTooFewSchedules"},
+  24: {message:"MergeTooManySchedules"},
+  25: {message:"MergeTokenMismatch"},
+  26: {message:"MergeOwnerMismatch"}
 }
 
 
@@ -99,6 +116,35 @@ executable_at: u64;
  * Hash of the already-uploaded WASM blob to migrate this contract to.
  */
 wasm_hash: Buffer;
+}
+
+
+/**
+ * A delegation of claim rights from a schedule's beneficiary to a
+ * third-party address, optionally bounded by amount and/or ledger expiry.
+ */
+export interface ClaimDelegation {
+  /**
+ * Tokens already claimed through this delegation.
+ */
+claimed_so_far: i128;
+  /**
+ * Address authorized to claim on the beneficiary's behalf.
+ */
+delegate: string;
+  /**
+ * Ledger sequence after which this delegation can no longer be used to
+ * claim. `None` = no expiry.
+ */
+expires_at_ledger: Option<u32>;
+  /**
+ * Maximum total tokens this delegate may ever claim. `None` = unlimited.
+ */
+max_amount: Option<i128>;
+  /**
+ * Whether the beneficiary has revoked this delegation.
+ */
+revoked: boolean;
 }
 
 
@@ -446,6 +492,14 @@ export interface Client {
   claimable_bulk: ({ids}: {ids: Array<u64>}, options?: MethodOptions) => Promise<AssembledTransaction<Array<i128>>>
 
   /**
+   * Construct and simulate a get_delegation transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Read a claim delegation by (schedule_id, delegation_id).
+   *
+   * Returns `None` if unknown rather than panicking.
+   */
+  get_delegation: ({schedule_id, delegation_id}: {schedule_id: u64, delegation_id: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Option<ClaimDelegation>>>
+
+  /**
    * Construct and simulate a get_milestones transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Get performance milestones for a schedule.
    */
@@ -553,6 +607,33 @@ export interface Client {
    * Returns `None` for unknown schedule IDs.
    */
   fully_vested_at: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Option<u64>>>
+
+  /**
+   * Construct and simulate a merge_schedules transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Atomically combine multiple active vesting schedules belonging to the
+   * same grantor-beneficiary pair into a single unified schedule.
+   *
+   * Every currently-claimable amount is paid out from each source before
+   * merging (paused sources are never skipped — `claimable_at` already
+   * accounts for frozen elapsed time while paused). The merged schedule's
+   * `total_amount` is the exact sum of each source's remaining
+   * (unclaimed) balance, so the token invariant
+   * `claimed_total + merged.total_amount == sum(source.total_amount)`
+   * holds exactly with no rounding dust.
+   *
+   * `start_time`, `duration_seconds`, `cliff_seconds`, and
+   * `lockup_duration` are each the token-weighted average of the sources,
+   * weighted by remaining balance. Because every source individually
+   * satisfies `cliff <= duration` and `lockup >= cliff`, and a weighted
+   * average of pointwise-ordered values preserves that order under floor
+   * division by a common denominator, the merged schedule automatically
+   * satisfies the same invariants without extra clamping.
+   *
+   * # Errors
+   *
+   * - `MergeTooFewSc
+   */
+  merge_schedules: ({caller, ids}: {caller: string, ids: Array<u64>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u64>>>
 
   /**
    * Construct and simulate a pending_upgrade transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -685,6 +766,32 @@ export interface Client {
   bump_schedule_ttl: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
+   * Construct and simulate a claim_as_delegate transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Claim vested tokens on behalf of a beneficiary through a delegation.
+   *
+   * Tokens are transferred directly to `delegate`. The claim is capped by
+   * whatever is currently claimable on the schedule and, if set, by the
+   * delegation's remaining `max_amount - claimed_so_far` budget. The token
+   * transfer and both counter updates (`delegation.claimed_so_far` and
+   * `schedule.claimed_amount`) happen within this single invocation, so a
+   * failed transfer reverts every state change here — there is no window
+   * where the counters advance without the tokens actually moving.
+   *
+   * Soroban auth for this call is scoped to `(schedule_id, delegation_id)`
+   * via `require_auth_for_args`, not a blanket `delegate.require_auth()`.
+   * A signature authorizing a claim for one delegation cannot be replayed
+   * against a different delegation or schedule, even one with the same
+   * delegate address.
+   *
+   * # Errors
+   *
+   * Returns `NotFound` if `schedule_id` does not exist.
+   * Returns `DelegationNotFound` if `delegation_id` does not exist for this schedule.
+   * Returns `NotDelegate` if `delega
+   */
+  claim_as_delegate: ({delegate, schedule_id, delegation_id}: {delegate: string, schedule_id: u64, delegation_id: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
    * Construct and simulate a claim_multi_token transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
    * Claim all vested tokens from a multi-token schedule.
    *
@@ -697,6 +804,27 @@ export interface Client {
    * Panics with `"Nothing to claim yet"` if no tokens are claimable.
    */
   claim_multi_token: ({schedule_id}: {schedule_id: u64}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
+
+  /**
+   * Construct and simulate a create_delegation transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Delegate claim rights on a schedule to a third-party address.
+   *
+   * The delegate may later call [`claim_as_delegate`] to pull vested
+   * tokens directly to their own address, bounded by `max_amount` and/or
+   * `expires_at_ledger`. A schedule may have at most
+   * [`MAX_DELEGATIONS_PER_SCHEDULE`] concurrently active (non-revoked)
+   * delegations; revoking one frees a slot.
+   *
+   * # Errors
+   *
+   * Returns `NotFound` if `schedule_id` does not exist.
+   * Returns `TooManyDelegations` if 5 active delegations already exist for this schedule.
+   * Panics with `"Not the beneficiary"` if `beneficiary` is not the schedule's beneficiary.
+   * Panics with `"Delegate must differ from beneficiary"` if `delegate == beneficiary`.
+   * Panics with `"Max amount must be positive"` if `max_amount` is `Some(n)` with `n <= 0`.
+   * Panics with `"Expiry must be in the future"` if `expires_at_ledger` is at or before the current ledger sequence.
+   */
+  create_delegation: ({beneficiary, schedule_id, delegate, max_amount, expires_at_ledger}: {beneficiary: string, schedule_id: u64, delegate: string, max_amount: Option<i128>, expires_at_ledger: Option<u32>}, options?: MethodOptions) => Promise<AssembledTransaction<Result<u32>>>
 
   /**
    * Construct and simulate a fund_and_activate transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -724,6 +852,24 @@ export interface Client {
    * cannot be cancelled by the grantor.
    */
   irrevocable_count: (options?: MethodOptions) => Promise<AssembledTransaction<u64>>
+
+  /**
+   * Construct and simulate a revoke_delegation transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
+   * Revoke a claim delegation, immediately and permanently disabling it.
+   *
+   * Idempotent: revoking an already-revoked delegation is a no-op success.
+   * Any `claim_as_delegate` call that has not yet started executing in a
+   * later transaction will see `revoked == true` and be rejected — Soroban
+   * applies transactions within a ledger sequentially, so there is no
+   * window where a revocation and a claim can both partially apply.
+   *
+   * # Errors
+   *
+   * Returns `NotFound` if `schedule_id` does not exist.
+   * Returns `DelegationNotFound` if `delegation_id` does not exist for this schedule.
+   * Panics with `"Not the beneficiary"` if `beneficiary` is not the schedule's beneficiary.
+   */
+  revoke_delegation: ({beneficiary, schedule_id, delegation_id}: {beneficiary: string, schedule_id: u64, delegation_id: u32}, options?: MethodOptions) => Promise<AssembledTransaction<Result<void>>>
 
   /**
    * Construct and simulate a upgrade_authority transaction. Returns an `AssembledTransaction` object which will have a `result` field containing the result of the simulation. If this transaction changes contract state, you will need to call `signAndSend()` on the returned object.
@@ -1053,6 +1199,7 @@ export class Client extends ContractClient {
         "AAAAAgAAADBUaGUgdHlwZSBvZiB2ZXN0aW5nIGN1cnZlIGFwcGxpZWQgdG8gYSBzY2hlZHVsZS4AAAAAAAAAC1Zlc3RpbmdLaW5kAAAAAAQAAAAAAAAAfFRva2VucyB1bmxvY2sgbGluZWFybHkgZnJvbSBgc3RhcnRfdGltZWAgdG8gYHN0YXJ0X3RpbWUgKyBkdXJhdGlvbmAuClRoZSBgY2xpZmZfZHVyYXRpb25gIGZpZWxkIGlzIGlnbm9yZWQgZm9yIHRoaXMgdmFyaWFudC4AAAAGTGluZWFyAAAAAAAAAAAAW05vIHRva2VucyB1bmxvY2sgdW50aWwgYHN0YXJ0X3RpbWUgKyBjbGlmZl9kdXJhdGlvbmAsIHRoZW4gdGhlIGZ1bGwKYW1vdW50IHVubG9ja3MgYXQgb25jZS4AAAAABUNsaWZmAAAAAAAAAAAAAR9ObyB0b2tlbnMgdW5sb2NrIHVudGlsIGBzdGFydF90aW1lICsgY2xpZmZfZHVyYXRpb25gICh0aGUgY2xpZmYpLgpBZnRlciB0aGUgY2xpZmYsIHRva2VucyB1bmxvY2sgbGluZWFybHkgZnJvbSB0aGUgY2xpZmYgZGF0ZSB0bwpgc3RhcnRfdGltZSArIGR1cmF0aW9uYC4KClRoaXMgbW9kZWxzIHRoZSBtb3N0IGNvbW1vbiByZWFsLXdvcmxkIGVtcGxveWVlIHZlc3Rpbmcgc2NoZWR1bGU6CmEgMS15ZWFyIGNsaWZmIGZvbGxvd2VkIGJ5IGxpbmVhciB2ZXN0aW5nIG92ZXIgdGhlIHJlbWFpbmluZyB0ZXJtLgAAAAAPTGluZWFyV2l0aENsaWZmAAAAAAAAAADoVG9rZW5zIHVubG9jayBhdCBkaXNjcmV0ZSBtaWxlc3RvbmVzIGRlZmluZWQgYXMgKG9mZnNldF9zZWNvbmRzLApiYXNpc19wb2ludHMpIHBhaXJzIHN0b3JlZCBpbiBgVmVzdGluZ1NjaGVkdWxlOjptaWxlc3RvbmVzYC4KRWFjaCBtaWxlc3RvbmUgdW5sb2NrcyBgdG90YWxfYW1vdW50ICogYnBzIC8gMTBfMDAwYCB0b2tlbnMgb25jZQpgc3RhcnRfdGltZSArIG9mZnNldF9zZWNvbmRzYCBpcyByZWFjaGVkLgAAAAZHcmFkZWQAAA==",
         "AAAAAAAAAVdDYW5jZWwgdGhlIGN1cnJlbnRseSBwZW5kaW5nIHVwZ3JhZGUgYW5ub3VuY2VtZW50LgoKVGhlIHVwZ3JhZGUgbWF5IG9ubHkgYmUgY2FuY2VsbGVkIGJlZm9yZSB0aGUgdGltZWxvY2sgZXhwaXJlcy4gT25jZSB0aGUKdXBncmFkZSBiZWNvbWVzIGV4ZWN1dGFibGUsIGl0IGNhbm5vdCBiZSBjYW5jZWxsZWQgdGhyb3VnaCB0aGlzIGZ1bmN0aW9uLgoKIyBFcnJvcnMKClBhbmljcyB3aXRoIGAiTm8gcGVuZGluZyB1cGdyYWRlImAgd2hlbiBubyB1cGdyYWRlIGlzIHBlbmRpbmcuClBhbmljcyB3aXRoIGAiVXBncmFkZSBhbHJlYWR5IGV4ZWN1dGFibGUiYCBpZiB0aGUgdGltZWxvY2sgaGFzIGV4cGlyZWQuAAAAAA5jYW5jZWxfdXBncmFkZQAAAAAAAQAAAAAAAAAJYXV0aG9yaXR5AAAAAAAAEwAAAAA=",
         "AAAAAAAAAZhCYXRjaCB2aWV3OiByZXR1cm4gY2xhaW1hYmxlIGFtb3VudHMgZm9yIG11bHRpcGxlIHNjaGVkdWxlIElEcyBpbiBhCnNpbmdsZSBzaW11bGF0aW9uIHJvdW5kLXRyaXAuCgpSZXN1bHRzIGFyZSByZXR1cm5lZCBpbiB0aGUgc2FtZSBvcmRlciBhcyB0aGUgaW5wdXQgYGlkc2AgdmVjdG9yLgpVbmtub3duIElEcyByZXR1cm4gMCBpbnN0ZWFkIG9mIHBhbmlja2luZywgc28gdGhlIGNhbGxlciBjYW4gc2FmZWx5CnBhc3MgdGhlIGZ1bGwgSUQgcmFuZ2Ugd2l0aG91dCBrbm93aW5nIHdoaWNoIG9uZXMgZXhpc3QuCgpUaGlzIHJlcGxhY2VzIHRoZSBgUHJvbWlzZS5hbGwoY2xhaW1hYmxlKWAgcGF0dGVybiBpbiB0aGUgZnJvbnRlbmQKZGFzaGJvYXJkLCByZWR1Y2luZyBOIHNpbXVsYXRpb24gcm91bmQtdHJpcHMgdG8gMS4AAAAOY2xhaW1hYmxlX2J1bGsAAAAAAAEAAAAAAAAAA2lkcwAAAAPqAAAABgAAAAEAAAPqAAAACw==",
+        "AAAAAAAAAGpSZWFkIGEgY2xhaW0gZGVsZWdhdGlvbiBieSAoc2NoZWR1bGVfaWQsIGRlbGVnYXRpb25faWQpLgoKUmV0dXJucyBgTm9uZWAgaWYgdW5rbm93biByYXRoZXIgdGhhbiBwYW5pY2tpbmcuAAAAAAAOZ2V0X2RlbGVnYXRpb24AAAAAAAIAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAAAAAAADWRlbGVnYXRpb25faWQAAAAAAAAEAAAAAQAAA+gAAAfQAAAAD0NsYWltRGVsZWdhdGlvbgA=",
         "AAAAAAAAACpHZXQgcGVyZm9ybWFuY2UgbWlsZXN0b25lcyBmb3IgYSBzY2hlZHVsZS4AAAAAAA5nZXRfbWlsZXN0b25lcwAAAAAAAQAAAAAAAAALc2NoZWR1bGVfaWQAAAAABgAAAAEAAAPoAAAD6gAAB9AAAAAUUGVyZm9ybWFuY2VNaWxlc3RvbmU=",
         "AAAAAAAAAcpQYXVzZSBhbiBhY3RpdmUgdmVzdGluZyBzY2hlZHVsZSAoZ3JhbnRvciBvbmx5KS4KCldoaWxlIHBhdXNlZCwgbm8gYWRkaXRpb25hbCB0b2tlbnMgdmVzdC4gVGhlIGJlbmVmaWNpYXJ5IGNhbiBzdGlsbCBjbGFpbQphbHJlYWR5LXZlc3RlZCB0b2tlbnMuIFRoZSBncmFudG9yIGNhbiByZXN1bWUgdGhlIHNjaGVkdWxlIGxhdGVyLgoKIyBFcnJvcnMKClBhbmljcyB3aXRoIGAiU2NoZWR1bGUgbm90IGZvdW5kImAgaWYgYHNjaGVkdWxlX2lkYCBkb2VzIG5vdCBleGlzdC4KUGFuaWNzIHdpdGggYCJOb3QgdGhlIGdyYW50b3IiYCBpZiBjYWxsZXIgaXMgbm90IHRoZSBncmFudG9yLgpQYW5pY3Mgd2l0aCBgIlNjaGVkdWxlIGFscmVhZHkgcGF1c2VkImAgaWYgYWxyZWFkeSBwYXVzZWQuClBhbmljcyB3aXRoIGAiQ2Fubm90IHBhdXNlIHJldm9rZWQgc2NoZWR1bGUiYCBpZiBzY2hlZHVsZSBpcyByZXZva2VkLgAAAAAADnBhdXNlX3NjaGVkdWxlAAAAAAABAAAAAAAAAAtzY2hlZHVsZV9pZAAAAAAGAAAAAA==",
         "AAAAAAAAAC5Ib3cgbWFueSBzY2hlZHVsZXMgaGF2ZSBiZWVuIGNyZWF0ZWQgaW4gdG90YWwuAAAAAAAOc2NoZWR1bGVfY291bnQAAAAAAAAAAAABAAAABg==",
@@ -1062,10 +1209,12 @@ export class Client extends ContractClient {
         "AAAAAAAAAUhNYXJrIGFuIHVuYWN0aXZhdGVkIHByb3Bvc2FsIGFzIGV4cGlyZWQgYWZ0ZXIgdGhlIDcyLWhvdXIgd2luZG93LgoKQW55b25lIHdobyBhdXRob3JpemVzIHRoZSBjYWxsIG1heSBleHBpcmUgYW4gdW5hY3RpdmF0ZWQgcHJvcG9zYWwuClRoZSBwcm9wb3NhbCByZW1haW5zIHJlYWRhYmxlIHZpYSBbYGdldF9wcm9wb3NhbGBdIHdpdGgKW2BQcm9wb3NhbFN0YXRlOjpFeHBpcmVkYF0uIEFjdGl2YXRlZCBwcm9wb3NhbHMgYXJlIGtlcHQgc28gdGhleQpyZW1haW4gYXVkaXRhYmxlLiBDYWxsaW5nIHRoaXMgb24gYW4gYWxyZWFkeSBleHBpcmVkIHByb3Bvc2FsIGlzIGEKbm8tb3AuAAAAD2V4cGlyZV9wcm9wb3NhbAAAAAACAAAAAAAAAAZjYWxsZXIAAAAAABMAAAAAAAAAC3Byb3Bvc2FsX2lkAAAAAAYAAAABAAAD6QAAA+0AAAAAAAAH0AAAAA1WZXN0Rmxvd0Vycm9yAAAA",
         "AAAAAAAAAtxFeHRlbmQgdGhlIHZlc3RpbmcgZHVyYXRpb24gb2YgYW4gZXhpc3Rpbmcgc2NoZWR1bGUuCgpPbmx5IHRoZSAqKmdyYW50b3IqKiBvZiB0aGUgc2NoZWR1bGUgbWF5IGNhbGwgdGhpcyBlbnRyeSBwb2ludC4KVGhlIHNjaGVkdWxlIG11c3Qgbm90IGJlIHJldm9rZWQuCgpgYWRkaXRpb25hbF9zZWNvbmRzYCBpcyBhZGRlZCB0byB0aGUgY3VycmVudCBgZHVyYXRpb25gLCBwdXNoaW5nIHRoZQplbmQgZGF0ZSBmb3J3YXJkIHdpdGhvdXQgY2hhbmdpbmcgdGhlIGBzdGFydF90aW1lYCBvciBhbnkgYWxyZWFkeS12ZXN0ZWQKYW1vdW50cy4gVGhpcyBpcyBlcXVpdmFsZW50IHRvIHJlLWlzc3VpbmcgdGhlIGdyYW50IHdpdGggYSBsb25nZXIKaG9yaXpvbiDigJQgdXNlZnVsIHdoZW4gYW4gZW1wbG95ZWUgc3RheXMgYmV5b25kIHRoZSBvcmlnaW5hbCBncmFudCBwZXJpb2QuCgpFbWl0cyBhbiBgImV4dF9kdXIiYCBldmVudCB3aXRoIGAoc2NoZWR1bGVfaWQsIG9sZF9kdXJhdGlvbiwgbmV3X2R1cmF0aW9uLCB0aW1lc3RhbXApYC4KCiMgUGFuaWNzCgotIGAiU2NoZWR1bGUgbm90IGZvdW5kImAg4oCUIHVua25vd24gYHNjaGVkdWxlX2lkYC4KLSBgIlNjaGVkdWxlIGhhcyBiZWVuIHJldm9rZWQiYCDigJQgY2Fubm90IGV4dGVuZCBhIHJldm9rZWQgc2NoZWR1bGUuCi0gYCJBZGRpdGlvbmFsIHNlY29uZHMgbXVzdCBiZSBwb3NpdGl2ZSJgIOKAlCB6ZXJvIGV4dGVuc2lvbiBpcyByZWplY3RlZC4AAAAPZXh0ZW5kX2R1cmF0aW9uAAAAAAIAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAAAAAAAEmFkZGl0aW9uYWxfc2Vjb25kcwAAAAAABgAAAAEAAAPpAAAD7QAAAAAAAAfQAAAADVZlc3RGbG93RXJyb3IAAAA=",
         "AAAAAAAAASZWaWV3OiByZXR1cm4gdGhlIHRpbWVzdGFtcCBhdCB3aGljaCBhIHNjaGVkdWxlIHJlYWNoZXMgMTAwJSB2ZXN0ZWQuCgpDb3JyZWN0IGZvciBldmVyeSBgVmVzdGluZ0tpbmRgLCBpbmNsdWRpbmcgYEdyYWRlZGAsIHdoZXJlIHRoZQpuYWl2ZSBjbGllbnQtc2lkZSBgc3RhcnRfdGltZSArIGR1cmF0aW9uYCBjYWxjdWxhdGlvbiBicmVha3MKYmVjYXVzZSB0aGUgbGFzdCBtaWxlc3RvbmUncyBvZmZzZXQgZGV0ZXJtaW5lcyBmdWxsIHZlc3RpbmcuClJldHVybnMgYE5vbmVgIGZvciB1bmtub3duIHNjaGVkdWxlIElEcy4AAAAAAA9mdWxseV92ZXN0ZWRfYXQAAAAAAQAAAAAAAAALc2NoZWR1bGVfaWQAAAAABgAAAAEAAAPoAAAABg==",
+        "AAAAAAAABABBdG9taWNhbGx5IGNvbWJpbmUgbXVsdGlwbGUgYWN0aXZlIHZlc3Rpbmcgc2NoZWR1bGVzIGJlbG9uZ2luZyB0byB0aGUKc2FtZSBncmFudG9yLWJlbmVmaWNpYXJ5IHBhaXIgaW50byBhIHNpbmdsZSB1bmlmaWVkIHNjaGVkdWxlLgoKRXZlcnkgY3VycmVudGx5LWNsYWltYWJsZSBhbW91bnQgaXMgcGFpZCBvdXQgZnJvbSBlYWNoIHNvdXJjZSBiZWZvcmUKbWVyZ2luZyAocGF1c2VkIHNvdXJjZXMgYXJlIG5ldmVyIHNraXBwZWQg4oCUIGBjbGFpbWFibGVfYXRgIGFscmVhZHkKYWNjb3VudHMgZm9yIGZyb3plbiBlbGFwc2VkIHRpbWUgd2hpbGUgcGF1c2VkKS4gVGhlIG1lcmdlZCBzY2hlZHVsZSdzCmB0b3RhbF9hbW91bnRgIGlzIHRoZSBleGFjdCBzdW0gb2YgZWFjaCBzb3VyY2UncyByZW1haW5pbmcKKHVuY2xhaW1lZCkgYmFsYW5jZSwgc28gdGhlIHRva2VuIGludmFyaWFudApgY2xhaW1lZF90b3RhbCArIG1lcmdlZC50b3RhbF9hbW91bnQgPT0gc3VtKHNvdXJjZS50b3RhbF9hbW91bnQpYApob2xkcyBleGFjdGx5IHdpdGggbm8gcm91bmRpbmcgZHVzdC4KCmBzdGFydF90aW1lYCwgYGR1cmF0aW9uX3NlY29uZHNgLCBgY2xpZmZfc2Vjb25kc2AsIGFuZApgbG9ja3VwX2R1cmF0aW9uYCBhcmUgZWFjaCB0aGUgdG9rZW4td2VpZ2h0ZWQgYXZlcmFnZSBvZiB0aGUgc291cmNlcywKd2VpZ2h0ZWQgYnkgcmVtYWluaW5nIGJhbGFuY2UuIEJlY2F1c2UgZXZlcnkgc291cmNlIGluZGl2aWR1YWxseQpzYXRpc2ZpZXMgYGNsaWZmIDw9IGR1cmF0aW9uYCBhbmQgYGxvY2t1cCA+PSBjbGlmZmAsIGFuZCBhIHdlaWdodGVkCmF2ZXJhZ2Ugb2YgcG9pbnR3aXNlLW9yZGVyZWQgdmFsdWVzIHByZXNlcnZlcyB0aGF0IG9yZGVyIHVuZGVyIGZsb29yCmRpdmlzaW9uIGJ5IGEgY29tbW9uIGRlbm9taW5hdG9yLCB0aGUgbWVyZ2VkIHNjaGVkdWxlIGF1dG9tYXRpY2FsbHkKc2F0aXNmaWVzIHRoZSBzYW1lIGludmFyaWFudHMgd2l0aG91dCBleHRyYSBjbGFtcGluZy4KCiMgRXJyb3JzCgotIGBNZXJnZVRvb0Zld1NjAAAAD21lcmdlX3NjaGVkdWxlcwAAAAACAAAAAAAAAAZjYWxsZXIAAAAAABMAAAAAAAAAA2lkcwAAAAPqAAAABgAAAAEAAAPpAAAABgAAB9AAAAANVmVzdEZsb3dFcnJvcgAAAA==",
         "AAAAAAAAADBSZXR1cm4gdGhlIHBlbmRpbmcgdXBncmFkZSBhbm5vdW5jZW1lbnQsIGlmIGFueS4AAAAPcGVuZGluZ191cGdyYWRlAAAAAAAAAAABAAAD6AAAB9AAAAAOUGVuZGluZ1VwZ3JhZGUAAA==",
         "AAAAAAAAAUZSZXN1bWUgYSBwYXVzZWQgdmVzdGluZyBzY2hlZHVsZSAoZ3JhbnRvciBvbmx5KS4KCkFjY3VtdWxhdGVzIHRoZSBwYXVzZWQgZHVyYXRpb24gYW5kIHJlc3VtZXMgdmVzdGluZyBmcm9tIHRoZSBjdXJyZW50IHRpbWUuCgojIEVycm9ycwoKUGFuaWNzIHdpdGggYCJTY2hlZHVsZSBub3QgZm91bmQiYCBpZiBgc2NoZWR1bGVfaWRgIGRvZXMgbm90IGV4aXN0LgpQYW5pY3Mgd2l0aCBgIk5vdCB0aGUgZ3JhbnRvciJgIGlmIGNhbGxlciBpcyBub3QgdGhlIGdyYW50b3IuClBhbmljcyB3aXRoIGAiU2NoZWR1bGUgbm90IHBhdXNlZCJgIGlmIG5vdCBjdXJyZW50bHkgcGF1c2VkLgAAAAAAD3Jlc3VtZV9zY2hlZHVsZQAAAAABAAAAAAAAAAtzY2hlZHVsZV9pZAAAAAAGAAAAAA==",
+        "AAAAAgAAAH9TdG9yYWdlIGtleXMgZm9yIGNsYWltIGRlbGVnYXRpb25zLCBrZXllZCBzZXBhcmF0ZWx5IGZyb20gW2BEYXRhS2V5YF0gc28KZGVsZWdhdGlvbiByZWNvcmRzIGRvbid0IGNyb3dkIHRoZSBzY2hlZHVsZSBrZXkgc3BhY2UuAAAAAAAAAAANRGVsZWdhdGlvbktleQAAAAAAAAMAAAABAAAAMkEgc2luZ2xlIGRlbGVnYXRpb246IChzY2hlZHVsZV9pZCwgZGVsZWdhdGlvbl9pZCkuAAAAAAAKRGVsZWdhdGlvbgAAAAAAAgAAAAYAAAAEAAAAAQAAAEVNb25vdG9uaWMgZGVsZWdhdGlvbi1pZCBjb3VudGVyIGZvciBhIHNjaGVkdWxlLCBrZXllZCBieSBzY2hlZHVsZV9pZC4AAAAAAAAPRGVsZWdhdGlvbkNvdW50AAAAAAEAAAAGAAAAAQAAAQ5Db3VudCBvZiBjdXJyZW50bHkgYWN0aXZlIChub24tcmV2b2tlZCkgZGVsZWdhdGlvbnMgZm9yIGEgc2NoZWR1bGUsCmtleWVkIGJ5IHNjaGVkdWxlX2lkLiBNYWludGFpbmVkIGluY3JlbWVudGFsbHkgYnkgYGNyZWF0ZV9kZWxlZ2F0aW9uYAphbmQgYHJldm9rZV9kZWxlZ2F0aW9uYCBzbyB0aGUgY29uY3VycmVuY3kgY2FwIGNhbiBiZSBlbmZvcmNlZCBpbgpPKDEpIGluc3RlYWQgb2Ygc2Nhbm5pbmcgZXZlcnkgaGlzdG9yaWNhbCBkZWxlZ2F0aW9uIGV2ZXIgY3JlYXRlZC4AAAAAABVBY3RpdmVEZWxlZ2F0aW9uQ291bnQAAAAAAAABAAAABg==",
         "AAAAAgAAAClMaWZlY3ljbGUgb2YgYW4gZXNjcm93IHNjaGVkdWxlIHByb3Bvc2FsLgAAAAAAAAAAAAANUHJvcG9zYWxTdGF0ZQAAAAAAAAQAAAAAAAAANFBhcmFtZXRlcnMgbG9ja2VkOyB0b2tlbnMgaGF2ZSBub3QgYmVlbiB0cmFuc2ZlcnJlZC4AAAAHUGVuZGluZwAAAAAAAAAAREJlbmVmaWNpYXJ5IGhhcyBhY2tub3dsZWRnZWQgb24tY2hhaW4uIEFjdGl2YXRpb24gaXMgc3RpbGwgb3B0aW9uYWwuAAAADEFja25vd2xlZGdlZAAAAAEAAABER3JhbnRvciBmdW5kZWQgdGhlIHByb3Bvc2FsLiBJbm5lciB2YWx1ZSBpcyB0aGUgY3JlYXRlZCBzY2hlZHVsZSBpZC4AAAAJQWN0aXZhdGVkAAAAAAAAAQAAAAYAAAAAAAAASlBhc3QgdGhlIDcyLWhvdXIgd2luZG93LiBXcml0dGVuIGJ5IFtgVmVzdEZsb3dDb250cmFjdDo6ZXhwaXJlX3Byb3Bvc2FsYF0uAAAAAAAHRXhwaXJlZAA=",
-        "AAAABAAAAAAAAAAAAAAADVZlc3RGbG93RXJyb3IAAAAAAAAPAAAAAAAAAAhOb3RGb3VuZAAAAAEAAAAAAAAADE5vdFJldm9jYWJsZQAAAAIAAAAAAAAADkFscmVhZHlSZXZva2VkAAAAAAADAAAAAAAAAA5Ob3RoaW5nVG9DbGFpbQAAAAAABAAAAAAAAAAKQW1vdW50WmVybwAAAAAABQAAAAAAAAAMRHVyYXRpb25aZXJvAAAABgAAAAAAAAAUQ2xpZmZFeGNlZWRzRHVyYXRpb24AAAAHAAAAAAAAAA9TY2hlZHVsZVJldm9rZWQAAAAACAAAAAAAAAATTG9ja3VwTGVzc1RoYW5DbGlmZgAAAAAJAAAAAAAAAAxJbnZhbGlkVG9rZW4AAAAKAAAAAAAAABBQcm9wb3NhbE5vdEZvdW5kAAAACwAAAAAAAAASUHJvcG9zYWxOb3RFeHBpcmVkAAAAAAAMAAAAAAAAAA9Qcm9wb3NhbEV4cGlyZWQAAAAADQAAAAAAAAAYUHJvcG9zYWxBbHJlYWR5QWN0aXZhdGVkAAAADgAAAAAAAAAQRHVyYXRpb25Ub29TaG9ydAAAAA8=",
+        "AAAABAAAAAAAAAAAAAAADVZlc3RGbG93RXJyb3IAAAAAAAAaAAAAAAAAAAhOb3RGb3VuZAAAAAEAAAAAAAAADE5vdFJldm9jYWJsZQAAAAIAAAAAAAAADkFscmVhZHlSZXZva2VkAAAAAAADAAAAAAAAAA5Ob3RoaW5nVG9DbGFpbQAAAAAABAAAAAAAAAAKQW1vdW50WmVybwAAAAAABQAAAAAAAAAMRHVyYXRpb25aZXJvAAAABgAAAAAAAAAUQ2xpZmZFeGNlZWRzRHVyYXRpb24AAAAHAAAAAAAAAA9TY2hlZHVsZVJldm9rZWQAAAAACAAAAAAAAAATTG9ja3VwTGVzc1RoYW5DbGlmZgAAAAAJAAAAAAAAAAxJbnZhbGlkVG9rZW4AAAAKAAAAAAAAABBQcm9wb3NhbE5vdEZvdW5kAAAACwAAAAAAAAASUHJvcG9zYWxOb3RFeHBpcmVkAAAAAAAMAAAAAAAAAA9Qcm9wb3NhbEV4cGlyZWQAAAAADQAAAAAAAAAYUHJvcG9zYWxBbHJlYWR5QWN0aXZhdGVkAAAADgAAAAAAAAAQRHVyYXRpb25Ub29TaG9ydAAAAA8AAAAAAAAAEkRlbGVnYXRpb25Ob3RGb3VuZAAAAAAAEAAAAAAAAAARRGVsZWdhdGlvblJldm9rZWQAAAAAAAARAAAAAAAAABFEZWxlZ2F0aW9uRXhwaXJlZAAAAAAAABIAAAAAAAAAE0RlbGVnYXRpb25FeGhhdXN0ZWQAAAAAEwAAAAAAAAALTm90RGVsZWdhdGUAAAAAFAAAAAAAAAASVG9vTWFueURlbGVnYXRpb25zAAAAAAAVAAAAAAAAABFNZXJnZVR5cGVNaXNtYXRjaAAAAAAAABYAAAAAAAAAFE1lcmdlVG9vRmV3U2NoZWR1bGVzAAAAFwAAAAAAAAAVTWVyZ2VUb29NYW55U2NoZWR1bGVzAAAAAAAAGAAAAAAAAAASTWVyZ2VUb2tlbk1pc21hdGNoAAAAAAAZAAAAAAAAABJNZXJnZU93bmVyTWlzbWF0Y2gAAAAAABo=",
         "AAAAAAAAAeBBbm5vdW5jZSBhbiB1cGNvbWluZyBjb250cmFjdCBXQVNNIG1pZ3JhdGlvbiBvbi1jaGFpbi4KClRoZSBXQVNNIGlkZW50aWZpZWQgYnkgYHdhc21faGFzaGAgbXVzdCBhbHJlYWR5IGJlIHVwbG9hZGVkLiBUaGlzCmZ1bmN0aW9uIHZlcmlmaWVzIHRoZSBXQVNNIGV4aXN0cyBiZWZvcmUgcmVjb3JkaW5nIHRoZSBhbm5vdW5jZW1lbnQsCnByZXZlbnRpbmcgYW5ub3VuY2VtZW50IG9mIG5vbi1leGlzdGVudCBXQVNNIGhhc2hlcy4KCiMgRXJyb3JzCgpQYW5pY3Mgd2l0aCBgIlVwZ3JhZGUgYXV0aG9yaXR5IG5vdCBpbml0aWFsaXplZCJgIGlmIHVuc2V0LgpQYW5pY3Mgd2l0aCBgIlVuYXV0aG9yaXplZCB1cGdyYWRlIGF1dGhvcml0eSJgIGlmIGBhdXRob3JpdHlgIGlzIG5vdCB0aGUgY29uZmlndXJlZCBhdXRob3JpdHkuClBhbmljcyB3aXRoIGAiV0FTTSBub3QgZm91bmQiYCBpZiB0aGUgV0FTTSBoYXNoIGhhcyBub3QgYmVlbiB1cGxvYWRlZC4AAAAQYW5ub3VuY2VfdXBncmFkZQAAAAIAAAAAAAAACWF1dGhvcml0eQAAAAAAABMAAAAAAAAACXdhc21faGFzaAAAAAAAA+4AAAAgAAAAAQAAB9AAAAAOUGVuZGluZ1VwZ3JhZGUAAA==",
         "AAAAAAAAAThBdHRlc3QgYSBwZXJmb3JtYW5jZSBtaWxlc3RvbmUgKG9yYWNsZSBvbmx5KS4KCiMgRXJyb3JzCgpQYW5pY3Mgd2l0aCBgIk9yYWNsZSBub3QgaW5pdGlhbGl6ZWQiYCBpZiBvcmFjbGUgaXMgbm90IGNvbmZpZ3VyZWQuClBhbmljcyB3aXRoIGAiTm90IHRoZSBvcmFjbGUiYCBpZiBjYWxsZXIgaXMgbm90IHRoZSBvcmFjbGUuClBhbmljcyB3aXRoIGAiTWlsZXN0b25lIGluZGV4IG91dCBvZiBib3VuZHMiYCBpZiBpbnZhbGlkIGluZGV4LgpQYW5pY3Mgd2l0aCBgIk1pbGVzdG9uZSBhbHJlYWR5IGF0dGVzdGVkImAgaWYgYWxyZWFkeSBhdHRlc3RlZC4AAAAQYXR0ZXN0X21pbGVzdG9uZQAAAAIAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAAAAAAAD21pbGVzdG9uZV9pbmRleAAAAAAEAAAAAA==",
         "AAAAAAAAAHdQcmV2aWV3IGhvdyBtYW55IHRva2VucyBhcmUgY2xhaW1hYmxlIGF0IGEgc3BlY2lmaWMgdGltZXN0YW1wLgoKUmV0dXJucyAwIGlmIGBzY2hlZHVsZV9pZGAgaXMgdW5rbm93biAoZG9lcyBub3QgcGFuaWMpLgAAAAAQY2xhaW1hYmxlX2Ftb3VudAAAAAIAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAAAAAAAA25vdwAAAAAGAAAAAQAAAAs=",
@@ -1074,11 +1223,15 @@ export class Client extends ContractClient {
         "AAAAAAAAAa9UcmFuc2ZlciBncmFudG9yIHJpZ2h0cyB0byBhIG5ldyBhZGRyZXNzIChjdXJyZW50IGdyYW50b3Igb25seSkuCgpNb3ZlcyByZXZvY2F0aW9uIGFuZCBwYXVzZSByaWdodHMgdG8gYG5ld19ncmFudG9yYC4gVXBkYXRlcyB0aGUgZ3JhbnRvcgpzY2hlZHVsZSBpbmRleCBmb3IgYm90aCB0aGUgb2xkIGFuZCBuZXcgZ3JhbnRvci4gRW1pdHMgYSBgImdybnRfY2huZyJgCmV2ZW50IHdpdGggYChvbGRfZ3JhbnRvciwgbmV3X2dyYW50b3IsIHRpbWVzdGFtcClgLgoKUmV0dXJucyBgT2soKCkpYCBpbW1lZGlhdGVseSB3aGVuIGBuZXdfZ3JhbnRvcmAgaXMgdGhlIHNhbWUgYXMgdGhlCmN1cnJlbnQgZ3JhbnRvciAobm8tb3ApLgoKIyBFcnJvcnMKClJldHVybnMgYFZlc3RGbG93RXJyb3I6Ok5vdEZvdW5kYCBpZiBgc2NoZWR1bGVfaWRgIGRvZXMgbm90IGV4aXN0LgAAAAAQdHJhbnNmZXJfZ3JhbnRvcgAAAAIAAAAAAAAAC3NjaGVkdWxlX2lkAAAAAAYAAAAAAAAAC25ld19ncmFudG9yAAAAABMAAAABAAAD6QAAA+0AAAAAAAAH0AAAAA1WZXN0Rmxvd0Vycm9yAAAA",
         "AAAAAQAAAE5BIGNvbnRyYWN0IFdBU00gdXBncmFkZSB0aGF0IGhhcyBiZWVuIGFubm91bmNlZCBvbi1jaGFpbiBidXQgbm90IHlldCBleGVjdXRlZC4AAAAAAAAAAAAOUGVuZGluZ1VwZ3JhZGUAAAAAAAMAAAAwTGVkZ2VyIHRpbWVzdGFtcCB3aGVuIHRoZSB1cGdyYWRlIHdhcyBhbm5vdW5jZWQuAAAADGFubm91bmNlZF9hdAAAAAYAAAA7RWFybGllc3QgbGVkZ2VyIHRpbWVzdGFtcCB3aGVuIHRoZSB1cGdyYWRlIG1heSBiZSBleGVjdXRlZC4AAAAADWV4ZWN1dGFibGVfYXQAAAAAAAAGAAAAQ0hhc2ggb2YgdGhlIGFscmVhZHktdXBsb2FkZWQgV0FTTSBibG9iIHRvIG1pZ3JhdGUgdGhpcyBjb250cmFjdCB0by4AAAAACXdhc21faGFzaAAAAAAAA+4AAAAg",
         "AAAAAAAABABFeHRlbmQgdGhpcyBjb250cmFjdCBpbnN0YW5jZSdzIHN0b3JhZ2UgVFRMLiBDYWxsYWJsZSBieSBhbnlvbmUKKGJlbmVmaWNpYXJ5LCBncmFudG9yLCBvciBhIHRoaXJkLXBhcnR5IGtlZXBlcikgLS0gdGhlcmUgaXMgbm90aGluZwpzZW5zaXRpdmUgYWJvdXQga2VlcGluZyB0aGUgY29udHJhY3QgYWxpdmUsIGFuZCByZXF1aXJpbmcgYXV0aCBoZXJlCndvdWxkIGp1c3QgbWFrZSBpdCBoYXJkZXIgZm9yIGtlZXBlcnMgdG8gcnVuIHRoaXMgcGVybWlzc2lvbmxlc3NseS4KCmBzY2hlZHVsZV9pZGAgaXMgdmFsaWRhdGVkIHRvIGV4aXN0IHNvIGEgY2FsbGVyIGdldHMgYSBjbGVhcgpbYFZlc3RGbG93RXJyb3I6Ok5vdEZvdW5kYF0gaW5zdGVhZCBvZiBzaWxlbnRseSBidW1waW5nIFRUTCBmb3IgYQpzY2hlZHVsZSB0aGF0IHdhcyBuZXZlciBjcmVhdGVkIChlLmcuIGEgdHlwbydkIElEKS4KCiMgTm90ZSBvbiBzdG9yYWdlIHRpZXIKClNjaGVkdWxlcyBjdXJyZW50bHkgbGl2ZSBpbiAqKmluc3RhbmNlKiogc3RvcmFnZSAoc2VlIFtgRGF0YUtleTo6U2NoZWR1bGVgXQphbmQgZXZlcnkgb3RoZXIgcmVhZC93cml0ZSBpbiB0aGlzIGNvbnRyYWN0KSwgbm90IHBlcnNpc3RlbnQgc3RvcmFnZSAtLQp0aGVyZSBpcyBubyBpbmRlcGVuZGVudCBwZXItc2NoZWR1bGUgcGVyc2lzdGVudCBlbnRyeSB0byBidW1wIHlldC4gSW5zdGFuY2UKc3RvcmFnZSBoYXMgYSBzaW5nbGUgVFRMIGZvciB0aGUgd2hvbGUgY29udHJhY3QgaW5zdGFuY2UsIHNvIHRoaXMgZXh0ZW5kcwp0aGF0IHNoYXJlZCBUVEwgcmF0aGVyIHRoYW4gYSBwZXItc2NoZWR1bGUga2V5LiBJZiBzY2hlZHVsZXMgYXJlIGV2ZXIKbWlncmF0ZWQgdG8gcGVyc2lzdGVudCBzdG9yYWdlICh0cmFja2VkIHNlcGFyYXRlbHkpLCB0aGlzIHNob3VsZCBiZQp1cGRhdGVkIHRvIGNhbGwgYGVudi5zdG9yYWdlKCkucGVyc2lzdGVudCgpLmV4dGVuZF90dGwoJkRhdGFLZXk6OlNjaGVkdWxlKHNjaGVkdWxlX2lkKSwgLi4pYAppbnN0ZWFkLgoKIyBFcnJvcnMKClJlAAAAEWJ1bXBfc2NoZWR1bGVfdHRsAAAAAAAAAQAAAAAAAAALc2NoZWR1bGVfaWQAAAAABgAAAAEAAAPpAAAD7QAAAAAAAAfQAAAADVZlc3RGbG93RXJyb3IAAAA=",
+        "AAAAAAAABABDbGFpbSB2ZXN0ZWQgdG9rZW5zIG9uIGJlaGFsZiBvZiBhIGJlbmVmaWNpYXJ5IHRocm91Z2ggYSBkZWxlZ2F0aW9uLgoKVG9rZW5zIGFyZSB0cmFuc2ZlcnJlZCBkaXJlY3RseSB0byBgZGVsZWdhdGVgLiBUaGUgY2xhaW0gaXMgY2FwcGVkIGJ5CndoYXRldmVyIGlzIGN1cnJlbnRseSBjbGFpbWFibGUgb24gdGhlIHNjaGVkdWxlIGFuZCwgaWYgc2V0LCBieSB0aGUKZGVsZWdhdGlvbidzIHJlbWFpbmluZyBgbWF4X2Ftb3VudCAtIGNsYWltZWRfc29fZmFyYCBidWRnZXQuIFRoZSB0b2tlbgp0cmFuc2ZlciBhbmQgYm90aCBjb3VudGVyIHVwZGF0ZXMgKGBkZWxlZ2F0aW9uLmNsYWltZWRfc29fZmFyYCBhbmQKYHNjaGVkdWxlLmNsYWltZWRfYW1vdW50YCkgaGFwcGVuIHdpdGhpbiB0aGlzIHNpbmdsZSBpbnZvY2F0aW9uLCBzbyBhCmZhaWxlZCB0cmFuc2ZlciByZXZlcnRzIGV2ZXJ5IHN0YXRlIGNoYW5nZSBoZXJlIOKAlCB0aGVyZSBpcyBubyB3aW5kb3cKd2hlcmUgdGhlIGNvdW50ZXJzIGFkdmFuY2Ugd2l0aG91dCB0aGUgdG9rZW5zIGFjdHVhbGx5IG1vdmluZy4KClNvcm9iYW4gYXV0aCBmb3IgdGhpcyBjYWxsIGlzIHNjb3BlZCB0byBgKHNjaGVkdWxlX2lkLCBkZWxlZ2F0aW9uX2lkKWAKdmlhIGByZXF1aXJlX2F1dGhfZm9yX2FyZ3NgLCBub3QgYSBibGFua2V0IGBkZWxlZ2F0ZS5yZXF1aXJlX2F1dGgoKWAuCkEgc2lnbmF0dXJlIGF1dGhvcml6aW5nIGEgY2xhaW0gZm9yIG9uZSBkZWxlZ2F0aW9uIGNhbm5vdCBiZSByZXBsYXllZAphZ2FpbnN0IGEgZGlmZmVyZW50IGRlbGVnYXRpb24gb3Igc2NoZWR1bGUsIGV2ZW4gb25lIHdpdGggdGhlIHNhbWUKZGVsZWdhdGUgYWRkcmVzcy4KCiMgRXJyb3JzCgpSZXR1cm5zIGBOb3RGb3VuZGAgaWYgYHNjaGVkdWxlX2lkYCBkb2VzIG5vdCBleGlzdC4KUmV0dXJucyBgRGVsZWdhdGlvbk5vdEZvdW5kYCBpZiBgZGVsZWdhdGlvbl9pZGAgZG9lcyBub3QgZXhpc3QgZm9yIHRoaXMgc2NoZWR1bGUuClJldHVybnMgYE5vdERlbGVnYXRlYCBpZiBgZGVsZWdhAAAAEWNsYWltX2FzX2RlbGVnYXRlAAAAAAAAAwAAAAAAAAAIZGVsZWdhdGUAAAATAAAAAAAAAAtzY2hlZHVsZV9pZAAAAAAGAAAAAAAAAA1kZWxlZ2F0aW9uX2lkAAAAAAAABAAAAAEAAAPpAAAD7QAAAAAAAAfQAAAADVZlc3RGbG93RXJyb3IAAAA=",
         "AAAAAAAAAU9DbGFpbSBhbGwgdmVzdGVkIHRva2VucyBmcm9tIGEgbXVsdGktdG9rZW4gc2NoZWR1bGUuCgpUcmFuc2ZlcnMgYWxsIGF2YWlsYWJsZSBjbGFpbWFibGUgYW1vdW50cyBhY3Jvc3MgYWxsIHRva2VucyBpbiB0aGUgc2NoZWR1bGUKdG8gdGhlIGJlbmVmaWNpYXJ5LCBzdWJqZWN0IHRvIGNsaWZmIGFuZCBsb2NrdXAgY29uc3RyYWludHMuCgojIEVycm9ycwoKUGFuaWNzIHdpdGggYCJTY2hlZHVsZSBub3QgZm91bmQiYCBpZiB0aGUgc2NoZWR1bGUgSUQgZG9lc24ndCBleGlzdC4KUGFuaWNzIHdpdGggYCJOb3RoaW5nIHRvIGNsYWltIHlldCJgIGlmIG5vIHRva2VucyBhcmUgY2xhaW1hYmxlLgAAAAARY2xhaW1fbXVsdGlfdG9rZW4AAAAAAAABAAAAAAAAAAtzY2hlZHVsZV9pZAAAAAAGAAAAAQAAA+kAAAPtAAAAAAAAB9AAAAANVmVzdEZsb3dFcnJvcgAAAA==",
+        "AAAAAAAAA2pEZWxlZ2F0ZSBjbGFpbSByaWdodHMgb24gYSBzY2hlZHVsZSB0byBhIHRoaXJkLXBhcnR5IGFkZHJlc3MuCgpUaGUgZGVsZWdhdGUgbWF5IGxhdGVyIGNhbGwgW2BjbGFpbV9hc19kZWxlZ2F0ZWBdIHRvIHB1bGwgdmVzdGVkCnRva2VucyBkaXJlY3RseSB0byB0aGVpciBvd24gYWRkcmVzcywgYm91bmRlZCBieSBgbWF4X2Ftb3VudGAgYW5kL29yCmBleHBpcmVzX2F0X2xlZGdlcmAuIEEgc2NoZWR1bGUgbWF5IGhhdmUgYXQgbW9zdApbYE1BWF9ERUxFR0FUSU9OU19QRVJfU0NIRURVTEVgXSBjb25jdXJyZW50bHkgYWN0aXZlIChub24tcmV2b2tlZCkKZGVsZWdhdGlvbnM7IHJldm9raW5nIG9uZSBmcmVlcyBhIHNsb3QuCgojIEVycm9ycwoKUmV0dXJucyBgTm90Rm91bmRgIGlmIGBzY2hlZHVsZV9pZGAgZG9lcyBub3QgZXhpc3QuClJldHVybnMgYFRvb01hbnlEZWxlZ2F0aW9uc2AgaWYgNSBhY3RpdmUgZGVsZWdhdGlvbnMgYWxyZWFkeSBleGlzdCBmb3IgdGhpcyBzY2hlZHVsZS4KUGFuaWNzIHdpdGggYCJOb3QgdGhlIGJlbmVmaWNpYXJ5ImAgaWYgYGJlbmVmaWNpYXJ5YCBpcyBub3QgdGhlIHNjaGVkdWxlJ3MgYmVuZWZpY2lhcnkuClBhbmljcyB3aXRoIGAiRGVsZWdhdGUgbXVzdCBkaWZmZXIgZnJvbSBiZW5lZmljaWFyeSJgIGlmIGBkZWxlZ2F0ZSA9PSBiZW5lZmljaWFyeWAuClBhbmljcyB3aXRoIGAiTWF4IGFtb3VudCBtdXN0IGJlIHBvc2l0aXZlImAgaWYgYG1heF9hbW91bnRgIGlzIGBTb21lKG4pYCB3aXRoIGBuIDw9IDBgLgpQYW5pY3Mgd2l0aCBgIkV4cGlyeSBtdXN0IGJlIGluIHRoZSBmdXR1cmUiYCBpZiBgZXhwaXJlc19hdF9sZWRnZXJgIGlzIGF0IG9yIGJlZm9yZSB0aGUgY3VycmVudCBsZWRnZXIgc2VxdWVuY2UuAAAAAAARY3JlYXRlX2RlbGVnYXRpb24AAAAAAAAFAAAAAAAAAAtiZW5lZmljaWFyeQAAAAATAAAAAAAAAAtzY2hlZHVsZV9pZAAAAAAGAAAAAAAAAAhkZWxlZ2F0ZQAAABMAAAAAAAAACm1heF9hbW91bnQAAAAAA+gAAAALAAAAAAAAABFleHBpcmVzX2F0X2xlZGdlcgAAAAAAA+gAAAAEAAAAAQAAA+kAAAAEAAAH0AAAAA1WZXN0Rmxvd0Vycm9yAAAA",
         "AAAAAAAAAVVUcmFuc2ZlciB0b2tlbnMgYW5kIGNyZWF0ZSB0aGUgc2NoZWR1bGUgZnJvbSBhIHBlbmRpbmcgcHJvcG9zYWwuCgpBY2tub3dsZWRnbWVudCBpcyBvcHRpb25hbC4gRmFpbHMgaWYgdGhlIDcyLWhvdXIgd2luZG93IGhhcyBlbGFwc2VkCm9yIGlmIHRoZSBwcm9wb3NhbCB3YXMgYWxyZWFkeSBhY3RpdmF0ZWQuIGBzdGFydF90aW1lYCBpcyB0YWtlbiBmcm9tCnRoZSBmcm96ZW4gcHJvcG9zYWwgYW5kIGlzIG5vdCByZS1jaGVja2VkIGFnYWluc3QgdGhlIGN1cnJlbnQgbGVkZ2VyCnRpbWUsIHNvIGEgcHJvcG9zYWwgY3JlYXRlZCB3aXRoIGBzdGFydF90aW1lID0gbm93YCByZW1haW5zIGZ1bmRhYmxlLgAAAAAAABFmdW5kX2FuZF9hY3RpdmF0ZQAAAAAAAAIAAAAAAAAAB2dyYW50b3IAAAAAEwAAAAAAAAALcHJvcG9zYWxfaWQAAAAABgAAAAEAAAPpAAAABgAAB9AAAAANVmVzdEZsb3dFcnJvcgAAAA==",
         "AAAAAAAAAC9HZXQgYWxsIG11bHRpLXRva2VuIHNjaGVkdWxlIElEcyBmb3IgYSBncmFudG9yLgAAAAARZ2V0X2dyYW50b3JfbXVsdGkAAAAAAAABAAAAAAAAAAdncmFudG9yAAAAABMAAAABAAAD6gAAAAY=",
         "AAAAAAAAAONWaWV3OiByZXR1cm4gdGhlIG51bWJlciBvZiBpcnJldm9jYWJsZSBzY2hlZHVsZXMuCgpDb3VudHMgc2NoZWR1bGVzIHdoZXJlIGByZXZvY2FibGVgIGlzIGZhbHNlLiBVc2VmdWwgZm9yIHByb3RvY29sLWxldmVsCnRydXN0IG1ldHJpY3Mg4oCUIGJlbmVmaWNpYXJpZXMgYW5kIGludmVzdG9ycyBjYXJlIGhvdyBtYW55IHNjaGVkdWxlcwpjYW5ub3QgYmUgY2FuY2VsbGVkIGJ5IHRoZSBncmFudG9yLgAAAAARaXJyZXZvY2FibGVfY291bnQAAAAAAAAAAAAAAQAAAAY=",
+        "AAAAAAAAAoVSZXZva2UgYSBjbGFpbSBkZWxlZ2F0aW9uLCBpbW1lZGlhdGVseSBhbmQgcGVybWFuZW50bHkgZGlzYWJsaW5nIGl0LgoKSWRlbXBvdGVudDogcmV2b2tpbmcgYW4gYWxyZWFkeS1yZXZva2VkIGRlbGVnYXRpb24gaXMgYSBuby1vcCBzdWNjZXNzLgpBbnkgYGNsYWltX2FzX2RlbGVnYXRlYCBjYWxsIHRoYXQgaGFzIG5vdCB5ZXQgc3RhcnRlZCBleGVjdXRpbmcgaW4gYQpsYXRlciB0cmFuc2FjdGlvbiB3aWxsIHNlZSBgcmV2b2tlZCA9PSB0cnVlYCBhbmQgYmUgcmVqZWN0ZWQg4oCUIFNvcm9iYW4KYXBwbGllcyB0cmFuc2FjdGlvbnMgd2l0aGluIGEgbGVkZ2VyIHNlcXVlbnRpYWxseSwgc28gdGhlcmUgaXMgbm8Kd2luZG93IHdoZXJlIGEgcmV2b2NhdGlvbiBhbmQgYSBjbGFpbSBjYW4gYm90aCBwYXJ0aWFsbHkgYXBwbHkuCgojIEVycm9ycwoKUmV0dXJucyBgTm90Rm91bmRgIGlmIGBzY2hlZHVsZV9pZGAgZG9lcyBub3QgZXhpc3QuClJldHVybnMgYERlbGVnYXRpb25Ob3RGb3VuZGAgaWYgYGRlbGVnYXRpb25faWRgIGRvZXMgbm90IGV4aXN0IGZvciB0aGlzIHNjaGVkdWxlLgpQYW5pY3Mgd2l0aCBgIk5vdCB0aGUgYmVuZWZpY2lhcnkiYCBpZiBgYmVuZWZpY2lhcnlgIGlzIG5vdCB0aGUgc2NoZWR1bGUncyBiZW5lZmljaWFyeS4AAAAAAAARcmV2b2tlX2RlbGVnYXRpb24AAAAAAAADAAAAAAAAAAtiZW5lZmljaWFyeQAAAAATAAAAAAAAAAtzY2hlZHVsZV9pZAAAAAAGAAAAAAAAAA1kZWxlZ2F0aW9uX2lkAAAAAAAABAAAAAEAAAPpAAAD7QAAAAAAAAfQAAAADVZlc3RGbG93RXJyb3IAAAA=",
         "AAAAAAAAAG9SZXR1cm4gdGhlIGNvbmZpZ3VyZWQgdXBncmFkZSBhdXRob3JpdHkuCgojIEVycm9ycwoKUGFuaWNzIHdpdGggYCJVcGdyYWRlIGF1dGhvcml0eSBub3QgaW5pdGlhbGl6ZWQiYCBpZiB1bnNldC4AAAAAEXVwZ3JhZGVfYXV0aG9yaXR5AAAAAAAAAAAAAAEAAAAT",
+        "AAAAAQAAAIdBIGRlbGVnYXRpb24gb2YgY2xhaW0gcmlnaHRzIGZyb20gYSBzY2hlZHVsZSdzIGJlbmVmaWNpYXJ5IHRvIGEKdGhpcmQtcGFydHkgYWRkcmVzcywgb3B0aW9uYWxseSBib3VuZGVkIGJ5IGFtb3VudCBhbmQvb3IgbGVkZ2VyIGV4cGlyeS4AAAAAAAAAAA9DbGFpbURlbGVnYXRpb24AAAAABQAAAC9Ub2tlbnMgYWxyZWFkeSBjbGFpbWVkIHRocm91Z2ggdGhpcyBkZWxlZ2F0aW9uLgAAAAAOY2xhaW1lZF9zb19mYXIAAAAAAAsAAAA4QWRkcmVzcyBhdXRob3JpemVkIHRvIGNsYWltIG9uIHRoZSBiZW5lZmljaWFyeSdzIGJlaGFsZi4AAAAIZGVsZWdhdGUAAAATAAAAX0xlZGdlciBzZXF1ZW5jZSBhZnRlciB3aGljaCB0aGlzIGRlbGVnYXRpb24gY2FuIG5vIGxvbmdlciBiZSB1c2VkIHRvCmNsYWltLiBgTm9uZWAgPSBubyBleHBpcnkuAAAAABFleHBpcmVzX2F0X2xlZGdlcgAAAAAAA+gAAAAEAAAARk1heGltdW0gdG90YWwgdG9rZW5zIHRoaXMgZGVsZWdhdGUgbWF5IGV2ZXIgY2xhaW0uIGBOb25lYCA9IHVubGltaXRlZC4AAAAAAAptYXhfYW1vdW50AAAAAAPoAAAACwAAADRXaGV0aGVyIHRoZSBiZW5lZmljaWFyeSBoYXMgcmV2b2tlZCB0aGlzIGRlbGVnYXRpb24uAAAAB3Jldm9rZWQAAAAAAQ==",
         "AAAAAQAAAPZBIHNpbmdsZSBtaWxlc3RvbmUgZm9yIGdyYWRlZCB2ZXN0aW5nLgoKYG9mZnNldF9zZWNzYCDigJQgc2Vjb25kcyBhZnRlciBgc3RhcnRfdGltZWAgd2hlbiB0aGlzIHRyYW5jaGUgdW5sb2Nrcy4KYGJwc2AgICAgICAgICDigJQgYmFzaXMgcG9pbnRzICgxLzEwXzAwMCkgb2YgYHRvdGFsX2Ftb3VudGAgdGhhdCB1bmxvY2suCgpUaGUgbWlsZXN0b25lcyBpbiBhIHNjaGVkdWxlIG11c3Qgc3VtIHRvIGV4YWN0bHkgMTBfMDAwIGJwcy4AAAAAAAAAAAAPR3JhZGVkTWlsZXN0b25lAAAAAAIAAAA7QmFzaXMgcG9pbnRzIChvdXQgb2YgMTBfMDAwKSBvZiBgdG90YWxfYW1vdW50YCB0aGF0IHVubG9jay4AAAAAA2JwcwAAAAAEAAAANVNlY29uZHMgYWZ0ZXIgYHN0YXJ0X3RpbWVgIHdoZW4gdGhpcyB0cmFuY2hlIHVubG9ja3MuAAAAAAAAC29mZnNldF9zZWNzAAAAAAY=",
         "AAAAAQAAAAAAAAAAAAAAD1Zlc3RpbmdTY2hlZHVsZQAAAAATAAAAJUFkZHJlc3MgdGhhdCBjYW4gY2xhaW0gdmVzdGVkIHRva2Vucy4AAAAAAAALYmVuZWZpY2lhcnkAAAAAEwAAACpUb2tlbnMgYWxyZWFkeSBjbGFpbWVkIGJ5IHRoZSBiZW5lZmljaWFyeS4AAAAAAA5jbGFpbWVkX2Ftb3VudAAAAAAACwAAAPdDbGlmZiBpbiBzZWNvbmRzIGZyb20gYHN0YXJ0X3RpbWVgLgoKLSBgTGluZWFyYDogaWdub3JlZC4KLSBgQ2xpZmZgOiB0b2tlbnMgdW5sb2NrIGFsbC1hdC1vbmNlIGFmdGVyIHRoaXMgbWFueSBzZWNvbmRzLgotIGBMaW5lYXJXaXRoQ2xpZmZgOiBubyB0b2tlbnMgdW50aWwgdGhpcyBwb2ludDsgbGluZWFyIGZyb20gaGVyZSB0byBlbmQuCi0gYEdyYWRlZGA6IGlnbm9yZWQgKG1pbGVzdG9uZXMgZGVmaW5lIHRoZSBzY2hlZHVsZSkuAAAAAA1jbGlmZl9zZWNvbmRzAAAAAAAABgAAABxWZXN0aW5nIGR1cmF0aW9uIGluIHNlY29uZHMuAAAAEGR1cmF0aW9uX3NlY29uZHMAAAAGAAAALkFkZHJlc3MgdGhhdCBjcmVhdGVkIGFuZCBmdW5kZWQgdGhpcyBzY2hlZHVsZS4AAAAAAAdncmFudG9yAAAAABMAAAAAAAAAAmlkAAAAAAAGAAAAAAAAAARraW5kAAAH0AAAAAtWZXN0aW5nS2luZAAAAADPTG9ja3VwIHBlcmlvZCBpbiBzZWNvbmRzIGZyb20gYHN0YXJ0X3RpbWVgLgpEdXJpbmcgbG9ja3VwLCB0b2tlbnMgYXJlIHZlc3RlZCAoZWFybmVkKSBidXQgbm9uLXRyYW5zZmVyYWJsZS4KQmVuZWZpY2lhcnkgY2FuIGNsYWltIGFmdGVyIGxvY2t1cCBleHBpcmVzIGV2ZW4gaWYgdG9rZW5zIHZlc3RlZCBlYXJsaWVyLgpNdXN0IGJlID49IGNsaWZmX3NlY29uZHMuAAAAAA9sb2NrdXBfZHVyYXRpb24AAAAABgAAAFJNaWxlc3RvbmUgdHJhbmNoZXMgZm9yIGBWZXN0aW5nS2luZDo6R3JhZGVkYCBzY2hlZHVsZXMuCkVtcHR5IGZvciBhbGwgb3RoZXIga2luZHMuAAAAAAAKbWlsZXN0b25lcwAAAAAD6gAAB9AAAAAPR3JhZGVkTWlsZXN0b25lAAAAACpXaGV0aGVyIHRoaXMgc2NoZWR1bGUgaXMgY3VycmVudGx5IHBhdXNlZC4AAAAAAAZwYXVzZWQAAAAAAAEAAAA+VGltZXN0YW1wIHdoZW4gdGhlIHNjaGVkdWxlIHdhcyBsYXN0IHBhdXNlZCAoMCBpZiBub3QgcGF1c2VkKS4AAAAAAAlwYXVzZWRfYXQAAAAAAAAGAAAAOkN1bXVsYXRpdmUgdGltZSAoaW4gc2Vjb25kcykgdGhlIHNjaGVkdWxlIGhhcyBiZWVuIHBhdXNlZC4AAAAAAA9wYXVzZWRfZHVyYXRpb24AAAAABgAAAD5XaGV0aGVyIHBlcmZvcm1hbmNlIG1pbGVzdG9uZXMgYXJlIHJlcXVpcmVkIGZvciB0aGlzIHNjaGVkdWxlLgAAAAAAE3JlcXVpcmVzX21pbGVzdG9uZXMAAAAAAQAAAC9XaGV0aGVyIHRoZSBncmFudG9yIGNhbiByZXZva2UgdW52ZXN0ZWQgdG9rZW5zLgAAAAAJcmV2b2NhYmxlAAAAAAAAAQAAACdXaGV0aGVyIHRoaXMgc2NoZWR1bGUgaGFzIGJlZW4gcmV2b2tlZC4AAAAAB3Jldm9rZWQAAAAAAQAAACNVbml4IHRpbWVzdGFtcCB3aGVuIHZlc3RpbmcgYmVnaW5zLgAAAAAKc3RhcnRfdGltZQAAAAAABgAAACxTdGVsbGFyIGFzc2V0IGNvbnRyYWN0IGZvciB0aGUgdmVzdGVkIHRva2VuLgAAAAV0b2tlbgAAAAAAABMAAABBVG90YWwgdG9rZW5zIGxvY2tlZCBpbnRvIHRoaXMgc2NoZWR1bGUgKGluIHN0cm9vcHMgLyBiYXNlIHVuaXRzKS4AAAAAAAAMdG90YWxfYW1vdW50AAAACwAAAKZUb2tlbnMgdGhhdCB3ZXJlIHZlc3RlZCBhdCB0aGUgbW9tZW50IG9mIHJldm9jYXRpb24uClplcm8gZm9yIG5vbi1yZXZva2VkIHNjaGVkdWxlcy4gVXNlZCBzbyB0aGUgYmVuZWZpY2lhcnkgY2FuIHN0aWxsCmNsYWltIGFscmVhZHktdmVzdGVkIHRva2VucyBhZnRlciBhIHJldm9jYXRpb24uAAAAAAAQdmVzdGVkX2F0X3Jldm9rZQAAAAs=",
         "AAAAAAAAAYhCYXRjaCB2aWV3OiBmZXRjaCBtdWx0aXBsZSBzY2hlZHVsZXMgaW4gYSBzaW5nbGUgc2ltdWxhdGlvbiByb3VuZC10cmlwLgoKUmV0dXJucyBgTm9uZWAgZm9yIHVua25vd24gSURzIHJhdGhlciB0aGFuIHBhbmlja2luZywgc28gY2FsbGVycyBjYW4Kc2FmZWx5IHBhc3MgYSBjb250aWd1b3VzIHJhbmdlIHdpdGhvdXQga25vd2luZyB3aGljaCBJRHMgZXhpc3QuClJlc3VsdHMgYXJlIHJldHVybmVkIGluIHRoZSBzYW1lIG9yZGVyIGFzIHRoZSBpbnB1dCBgaWRzYCB2ZWN0b3IuCgpUaGlzIHJlcGxhY2VzIHRoZSBgUHJvbWlzZS5hbGwoZ2V0U2NoZWR1bGUpYCBwYXR0ZXJuIGluIHRoZSBmcm9udGVuZApkYXNoYm9hcmQsIHJlZHVjaW5nIE4gc2ltdWxhdGlvbiByb3VuZC10cmlwcyB0byAxLgAAABJnZXRfc2NoZWR1bGVfYmF0Y2gAAAAAAAEAAAAAAAAAA2lkcwAAAAPqAAAABgAAAAEAAAPqAAAD6AAAB9AAAAAPVmVzdGluZ1NjaGVkdWxlAA==",
@@ -1125,6 +1278,7 @@ export class Client extends ContractClient {
         vested_amount: this.txFromJSON<i128>,
         cancel_upgrade: this.txFromJSON<null>,
         claimable_bulk: this.txFromJSON<Array<i128>>,
+        get_delegation: this.txFromJSON<Option<ClaimDelegation>>,
         get_milestones: this.txFromJSON<Option<Array<PerformanceMilestone>>>,
         pause_schedule: this.txFromJSON<null>,
         schedule_count: this.txFromJSON<u64>,
@@ -1133,6 +1287,7 @@ export class Client extends ContractClient {
         expire_proposal: this.txFromJSON<Result<void>>,
         extend_duration: this.txFromJSON<Result<void>>,
         fully_vested_at: this.txFromJSON<Option<u64>>,
+        merge_schedules: this.txFromJSON<Result<u64>>,
         pending_upgrade: this.txFromJSON<Option<PendingUpgrade>>,
         resume_schedule: this.txFromJSON<null>,
         announce_upgrade: this.txFromJSON<PendingUpgrade>,
@@ -1142,10 +1297,13 @@ export class Client extends ContractClient {
         propose_schedule: this.txFromJSON<Result<u64>>,
         transfer_grantor: this.txFromJSON<Result<void>>,
         bump_schedule_ttl: this.txFromJSON<Result<void>>,
+        claim_as_delegate: this.txFromJSON<Result<void>>,
         claim_multi_token: this.txFromJSON<Result<void>>,
+        create_delegation: this.txFromJSON<Result<u32>>,
         fund_and_activate: this.txFromJSON<Result<u64>>,
         get_grantor_multi: this.txFromJSON<Array<u64>>,
         irrevocable_count: this.txFromJSON<u64>,
+        revoke_delegation: this.txFromJSON<Result<void>>,
         upgrade_authority: this.txFromJSON<string>,
         get_schedule_batch: this.txFromJSON<Array<Option<VestingSchedule>>>,
         get_upgrade_status: this.txFromJSON<Option<readonly [Buffer, u64]>>,
