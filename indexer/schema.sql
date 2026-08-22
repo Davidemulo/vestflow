@@ -174,3 +174,59 @@ CREATE TABLE IF NOT EXISTS nonces (
 );
 
 CREATE INDEX IF NOT EXISTS idx_nonces_public_key ON nonces (public_key);
+
+-- ── Webhooks ──────────────────────────────────────────────────────────
+-- Registered HTTP endpoints that receive indexed contract events.
+-- The signing secret is never stored in plaintext: `secret_hash` is a
+-- scrypt hash used to authenticate a presented secret, and
+-- `secret_encrypted` is AES-256-GCM ciphertext (key: WEBHOOK_ENCRYPTION_KEY)
+-- that the delivery worker decrypts in memory to sign outgoing requests.
+CREATE TABLE IF NOT EXISTS webhook_registrations (
+  id               TEXT PRIMARY KEY,          -- UUID
+  owner_address    TEXT NOT NULL,             -- wallet address from the auth token
+  endpoint_url     TEXT NOT NULL,
+  secret_hash      TEXT NOT NULL,
+  secret_encrypted TEXT NOT NULL,
+  event_types      TEXT NOT NULL,             -- JSON array, e.g. ["claimed"] or ["*"]
+  challenge        TEXT,                      -- pending handshake challenge, cleared on verify
+  verified_at      INTEGER,                   -- unix seconds; NULL until the handshake succeeds
+  disabled_at      INTEGER,                   -- unix seconds; NULL while active
+  created_at       INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_reg_owner ON webhook_registrations (owner_address);
+CREATE INDEX IF NOT EXISTS idx_webhook_reg_active
+  ON webhook_registrations (verified_at, disabled_at);
+
+-- One row per (registration, event). `id` is the X-VestFlow-Delivery-ID and
+-- stays stable across every retry attempt so receivers can deduplicate.
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+  id               TEXT PRIMARY KEY,
+  registration_id  TEXT NOT NULL REFERENCES webhook_registrations (id) ON DELETE CASCADE,
+  event_id         TEXT NOT NULL,
+  event_type       TEXT NOT NULL,
+  payload          TEXT NOT NULL,             -- JSON body sent to the endpoint
+  status           TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+    'pending',
+    'in_flight',
+    'delivered',
+    'failed',
+    'dead_lettered'
+  )),
+  attempt_count    INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at  INTEGER NOT NULL DEFAULT (unixepoch()),
+  last_error       TEXT,
+  last_status_code INTEGER,
+  claimed_at       INTEGER,                   -- lease timestamp for in_flight rows
+  delivered_at     INTEGER,
+  dead_lettered_at INTEGER,
+  created_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at       INTEGER NOT NULL DEFAULT (unixepoch()),
+  UNIQUE (registration_id, event_id)          -- fan-out is idempotent per event
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_due
+  ON webhook_deliveries (status, next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_registration
+  ON webhook_deliveries (registration_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event ON webhook_deliveries (event_id);
