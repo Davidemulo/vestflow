@@ -21,6 +21,7 @@ import {
   matchesEventType,
   normalizeEventTypes,
   parseSignatureHeader,
+  resetEncryptionKeyWarning,
   RETRY_SCHEDULE_SECONDS,
   SIGNATURE_TOLERANCE_SECONDS,
   signPayload,
@@ -193,6 +194,24 @@ describe("secret storage", () => {
       32
     );
     expect(() => getEncryptionKey({})).toThrow(/WEBHOOK_ENCRYPTION_KEY/);
+  });
+
+  it("warns once when the key has to be derived, and never for proper hex", () => {
+    resetEncryptionKeyWarning();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    getEncryptionKey({ WEBHOOK_ENCRYPTION_KEY: "f".repeat(64) });
+    expect(warn).not.toHaveBeenCalled();
+
+    getEncryptionKey({ WEBHOOK_ENCRYPTION_KEY: "my-secret-key" });
+    getEncryptionKey({ WEBHOOK_ENCRYPTION_KEY: "my-secret-key" });
+
+    // Once per process — the delivery worker resolves the key per request.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toMatch(/64 hex characters/);
+
+    warn.mockRestore();
+    resetEncryptionKeyWarning();
   });
 
   it("generates distinct high-entropy secrets and challenges", () => {

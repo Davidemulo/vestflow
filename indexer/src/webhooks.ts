@@ -252,10 +252,23 @@ export function verifySecretHash(secret: string, stored: string): boolean {
   }
 }
 
+/** Guards the derived-key warning so it is logged once per process. */
+let warnedAboutDerivedKey = false;
+
+/** Resets the once-per-process warning latch. Test seam. */
+export function resetEncryptionKeyWarning(): void {
+  warnedAboutDerivedKey = false;
+}
+
 /**
  * Resolves the AES key for secret encryption from WEBHOOK_ENCRYPTION_KEY.
- * A 64-character hex value is used verbatim; any other value is stretched
- * to 32 bytes with SHA-256 so operators cannot accidentally supply a short key.
+ * A 64-character hex value is used verbatim; any other value is stretched to
+ * 32 bytes with SHA-256 so a short value cannot break the cipher outright.
+ *
+ * Stretching produces a well-formed key of the wrong strength — the stored
+ * secrets are only as strong as the configured value's entropy — so the
+ * derived path warns once rather than failing, which would take down a
+ * deployment already relying on it.
  */
 export function getEncryptionKey(env: NodeJS.ProcessEnv = process.env): Buffer {
   const configured = env.WEBHOOK_ENCRYPTION_KEY;
@@ -266,6 +279,16 @@ export function getEncryptionKey(env: NodeJS.ProcessEnv = process.env): Buffer {
   }
   if (/^[0-9a-f]{64}$/i.test(configured)) {
     return Buffer.from(configured, "hex");
+  }
+
+  if (!warnedAboutDerivedKey) {
+    warnedAboutDerivedKey = true;
+    console.warn(
+      "[webhooks] WEBHOOK_ENCRYPTION_KEY is not 64 hex characters — deriving a key " +
+        "with SHA-256. Stored webhook secrets are only as strong as this value's " +
+        "entropy. Generate a proper key with: " +
+        `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+    );
   }
   return crypto.createHash("sha256").update(configured, "utf8").digest();
 }

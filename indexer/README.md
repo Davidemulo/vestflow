@@ -323,6 +323,11 @@ holds a scrypt hash, and `secret_encrypted` holds AES-256-GCM ciphertext
 that the worker decrypts in memory only to sign a request. Rotating
 `WEBHOOK_ENCRYPTION_KEY` invalidates existing registrations.
 
+A `WEBHOOK_ENCRYPTION_KEY` that is not 64 hex characters is stretched to 32
+bytes with SHA-256 and logs a warning once at startup: the derived key is
+well-formed but carries only the entropy of the value you supplied, so
+prefer a generated key.
+
 ### Load test
 
 ```bash
