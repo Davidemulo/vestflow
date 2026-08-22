@@ -8,12 +8,16 @@
  * Endpoints:
  *   GET /health
  *   GET /events?address=G...&event_type=claimed&limit=50&offset=0
+ *
+ * Plus the authenticated webhook management API (see webhook-api.ts):
+ *   POST/GET/DELETE /webhooks…
  */
 
 import http from "http";
 import { URL } from "url";
 import { getCheckpoint, getTvlStats, queryEvents, queryHistory } from "./db";
 import type { EventQueryParams } from "./types";
+import { routeWebhookRequest } from "./webhook-api";
 
 const PORT = Number(process.env.INDEXER_PORT ?? "3001");
 
@@ -133,14 +137,8 @@ function handleHistory(
   }
 }
 
-function createServer(): http.Server {
-  return http.createServer((req, res) => {
-    if (req.method !== "GET") {
-      return json(res, 405, {
-        error: "Method not allowed",
-      });
-    }
-
+export function createServer(): http.Server {
+  return http.createServer(async (req, res) => {
     let url: URL;
 
     try {
@@ -148,6 +146,32 @@ function createServer(): http.Server {
     } catch {
       return json(res, 400, {
         error: "Invalid URL",
+      });
+    }
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Max-Age": "600",
+      });
+      return res.end();
+    }
+
+    // Webhook management routes handle their own methods and auth.
+    if (url.pathname === "/webhooks" || url.pathname.startsWith("/webhooks/")) {
+      try {
+        if (await routeWebhookRequest(req, res, url)) return;
+      } catch (error) {
+        console.error("[server] Webhook route error:", error);
+        return json(res, 500, { error: "Webhook request failed" });
+      }
+    }
+
+    if (req.method !== "GET") {
+      return json(res, 405, {
+        error: "Method not allowed",
       });
     }
 
@@ -176,12 +200,17 @@ function createServer(): http.Server {
   });
 }
 
-const server = createServer();
+// Only bind a port when executed directly — tests import createServer().
+if (typeof require !== "undefined" && require.main === module) {
+  const server = createServer();
 
-server.listen(PORT, () => {
-  console.log(`[server] Indexer query API → http://localhost:${PORT}`);
-  console.log("[server]   GET /health");
-  console.log(
-    "[server]   GET /events?address=G...&event_type=claimed&limit=50"
-  );
-});
+  server.listen(PORT, () => {
+    console.log(`[server] Indexer query API → http://localhost:${PORT}`);
+    console.log("[server]   GET /health");
+    console.log(
+      "[server]   GET /events?address=G...&event_type=claimed&limit=50"
+    );
+    console.log("[server]   POST /webhooks (Bearer wallet JWT)");
+    console.log("[server]   GET  /webhooks/:id/deliveries?status=&limit=");
+  });
+}

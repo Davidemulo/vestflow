@@ -17,6 +17,7 @@
 import { rpc as StellarRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
 import { getCheckpoint, setCheckpoint, insertEvent, computeTvlStats, insertBeneficiarySchedule } from "./db";
 import { getNetworkConfig, parseNetwork } from "./config";
+import { WebhookDeliveryWorker, fanOutEvent } from "./webhook-delivery";
 import type { EventType } from "./types";
 
 const NETWORK = parseNetwork(process.env.INDEXER_NETWORK);
@@ -219,6 +220,30 @@ async function poll(): Promise<void> {
           if (eventType === "schedule_created" && beneficiary && scheduleId !== null) {
             insertBeneficiarySchedule(beneficiary, scheduleId, NETWORK);
           }
+          // Queue webhook deliveries. This only writes rows — the HTTP
+          // requests happen on the delivery worker pool, so a slow or dead
+          // subscriber can never stall indexing.
+          try {
+            fanOutEvent(
+              {
+                event_id: raw.id,
+                event_type: eventType,
+                network: NETWORK,
+                ledger: raw.ledger,
+                ledger_closed_at: raw.ledgerClosedAt,
+                schedule_id: scheduleId,
+                proposal_id: proposalId,
+                grantor,
+                beneficiary,
+                token,
+                amount,
+                created_amount: createdAmount,
+              },
+              NETWORK
+            );
+          } catch (err) {
+            console.error("[poller] Webhook fan-out failed:", err);
+          }
         }
         if (raw.ledger > highestLedger) highestLedger = raw.ledger;
       }
@@ -252,6 +277,38 @@ async function poll(): Promise<void> {
   }
 }
 
+// ── Webhook delivery ──────────────────────────────────────────────────
+
+/**
+ * Boots the delivery worker alongside the poller so queued webhooks are
+ * sent within a second of being indexed. Disabled when the process has no
+ * encryption key (no registration could have been created without one).
+ */
+function startWebhookWorker(): WebhookDeliveryWorker | null {
+  if (process.env.WEBHOOK_DELIVERY_ENABLED === "false") {
+    console.log("[poller]   Webhooks : disabled (WEBHOOK_DELIVERY_ENABLED=false)");
+    return null;
+  }
+  if (!process.env.WEBHOOK_ENCRYPTION_KEY) {
+    console.log("[poller]   Webhooks : disabled (WEBHOOK_ENCRYPTION_KEY not set)");
+    return null;
+  }
+
+  const worker = new WebhookDeliveryWorker({ network: NETWORK });
+  worker.start();
+  console.log(
+    `[poller]   Webhooks : delivering with ${worker.concurrency} concurrent senders`
+  );
+
+  const shutdown = () => {
+    void worker.stop().finally(() => process.exit(0));
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
+
+  return worker;
+}
+
 // ── Entry point ───────────────────────────────────────────────────────
 
 async function run(): Promise<void> {
@@ -262,6 +319,8 @@ async function run(): Promise<void> {
   console.log(`[poller]   Interval : ${POLL_INTERVAL_MS} ms`);
   console.log(`[poller]   TVL job  : every ${TVL_COMPUTE_INTERVAL_MS} ms`);
   console.log(`[poller]   Checkpoint: ledger ${getCheckpoint(NETWORK)}`);
+
+  startWebhookWorker();
 
   let lastTvlCompute = 0;
 

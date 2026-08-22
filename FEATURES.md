@@ -394,6 +394,36 @@ Link to public schedule views to give beneficiaries an easy way to check their v
 
 ---
 
+### 🪝 Production Webhooks (#564)
+
+**Description**: Signed, at-least-once HTTP delivery of every indexed contract event to registered endpoints, with exponential-backoff retries and a dead-letter queue. Implemented in the indexer — see [indexer/README.md](indexer/README.md#webhooks) for the full guide.
+
+**How to Use**:
+1. Register an endpoint: `POST /webhooks` with a wallet JWT, the endpoint URL and the event types you want.
+2. Store the returned signing secret on your endpoint.
+3. Complete the handshake: `POST /webhooks/:id/verify` — your endpoint echoes the signature VestFlow sends.
+4. Receive signed `POST`s for each matching event, and answer `2xx` to acknowledge.
+
+**Features**:
+- HMAC-SHA256 request signing, `X-VestFlow-Signature: t=<unix>,v1=<hmac>`, verified in constant time
+- Replay protection: signatures older than 5 minutes are rejected
+- Handshake verification so an endpoint must prove it holds the secret before any event is sent (blocks SSRF via rogue registrations)
+- Stable `X-VestFlow-Delivery-ID` across retries for downstream idempotency
+- Durable retry schedule: 10 attempts with 1s → 256s backoff, resumed after restarts
+- Dead-letter queue with manual requeue
+- Non-blocking fan-out: a slow subscriber never stalls indexing
+
+**Routes** (indexer, port 3001):
+- `POST /webhooks` — register an endpoint
+- `POST /webhooks/:id/verify` — run the handshake
+- `DELETE /webhooks/:id` — disable a registration
+- `GET /webhooks/:id/deliveries?status=&limit=` — delivery history
+- `POST /webhooks/:id/deliveries/:delivery_id/retry` — requeue a dead-lettered delivery
+
+**Configuration**: `WEBHOOK_ENCRYPTION_KEY` (required) and a `JWT_SECRET` shared with the app; delivery tuning via `WEBHOOK_CONCURRENCY`, `WEBHOOK_POLL_INTERVAL_MS` and `WEBHOOK_LEASE_SECONDS`.
+
+---
+
 ## Future Enhancements
 
 Potential improvements for future releases:
@@ -405,7 +435,6 @@ Potential improvements for future releases:
 - Schedule analytics per grantor/beneficiary
 - Widget customization (colors, fonts)
 - More Stellar Quest integrations
-- Event webhooks for real-time updates
 
 ---
 

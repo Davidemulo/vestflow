@@ -26,7 +26,11 @@ export function getPool(): Pool {
 
 export async function initializeSchema(): Promise<void> {
   const migrationsDir = path.join(__dirname, "..", "migrations");
-  const files = ["001_postgresql_schema.sql", "002_proposal_events.sql"];
+  const files = [
+    "001_postgresql_schema.sql",
+    "002_proposal_events.sql",
+    "003_webhook_system.sql",
+  ];
   const client = await getPool().connect();
   try {
     for (const file of files) {
