@@ -1,3 +1,13 @@
+/**
+ * In-process webhook registry backing `/api/webhooks` (#443): best-effort,
+ * fire-and-forget delivery with no persistence or retries.
+ *
+ * The production system — durable queue, HMAC handshake, exponential backoff
+ * and a dead-letter queue — lives in the indexer (`indexer/src/webhook-*.ts`,
+ * see indexer/README.md#webhooks). Prefer it for anything that must not
+ * silently drop events.
+ */
+
 import crypto from "crypto";
 
 export type WebhookEventType = "schedule.claimed" | "schedule.revoked" | "schedule.created";
