@@ -6784,6 +6784,207 @@ mod test {
         );
     }
 
+    #[test]
+    fn test_merge_includes_paused_schedule_frozen_claimable() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        set_time(&env, 0);
+        let id_active = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        let id_paused = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        // Pause id_paused at t=300 (300/1000 vested at that point).
+        set_time(&env, 300);
+        client.pause_schedule(&id_paused);
+
+        // Advance further while still paused. id_paused's vested amount stays
+        // frozen at 300; id_active keeps vesting normally.
+        set_time(&env, 600);
+        assert_eq!(client.claimable(&id_active), 600);
+        assert_eq!(client.claimable(&id_paused), 300);
+
+        let ids = soroban_sdk::vec![&env, id_active, id_paused];
+        let merged_id = client.merge_schedules(&grantor, &ids);
+
+        // The paused source was not skipped: the beneficiary received
+        // 600 (active) + 300 (paused, frozen) = 900 during the merge's
+        // claim-out step — not 1200, which is what they'd have received if
+        // the pause freeze were ignored and id_paused's full unpaused
+        // elapsed-time vested amount (600) were paid out instead.
+        assert_eq!(token.balance(&beneficiary), 900);
+
+        let merged = client.get_schedule(&merged_id);
+        // remaining_active = 1000 - 600 = 400; remaining_paused = 1000 - 300 = 700.
+        assert_eq!(merged.total_amount, 400 + 700);
+
+        assert!(
+            client.try_get_schedule(&id_active).is_err()
+                || client.try_get_schedule(&id_active).unwrap().is_err()
+        );
+        assert!(
+            client.try_get_schedule(&id_paused).is_err()
+                || client.try_get_schedule(&id_paused).unwrap().is_err()
+        );
+    }
+
+    #[test]
+    fn test_merge_updates_grantor_and_beneficiary_indices() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+
+        set_time(&env, 0);
+        let id1 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        let id2 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        // An unrelated schedule that must survive the merge untouched, to
+        // guard against the index-rebuild logic accidentally dropping
+        // entries it shouldn't.
+        let id_other = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &500,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        set_time(&env, 500);
+        let ids = soroban_sdk::vec![&env, id1, id2];
+        let merged_id = client.merge_schedules(&grantor, &ids);
+
+        let grantor_ids = client.get_schedules_by_grantor(&grantor);
+        assert!(!grantor_ids.contains(&id1));
+        assert!(!grantor_ids.contains(&id2));
+        assert!(grantor_ids.contains(&merged_id));
+        assert!(grantor_ids.contains(&id_other));
+
+        let beneficiary_ids = client.get_schedules_by_beneficiary(&beneficiary);
+        assert!(!beneficiary_ids.contains(&id1));
+        assert!(!beneficiary_ids.contains(&id2));
+        assert!(beneficiary_ids.contains(&merged_id));
+        assert!(beneficiary_ids.contains(&id_other));
+    }
+
+    #[test]
+    fn test_merge_all_sources_fully_claimed_yields_degenerate_schedule() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, grantor, beneficiary, token_addr, _) = setup(&env);
+        let token = TokenClient::new(&env, &token_addr);
+
+        set_time(&env, 0);
+        let id1 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &1000,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+        let id2 = client.create_schedule(
+            &grantor,
+            &beneficiary,
+            &token_addr,
+            &500,
+            &0,
+            &1000,
+            &0,
+            &0,
+            &VestingKind::Linear,
+            &true,
+        );
+
+        // Both schedules are fully vested by the time of the merge, and
+        // neither has been claimed yet — the merge's own claim-out step
+        // drains both to zero remaining balance before the timeline average
+        // is computed.
+        set_time(&env, 1000);
+
+        let ids = soroban_sdk::vec![&env, id1, id2];
+        let merged_id = client.merge_schedules(&grantor, &ids);
+
+        // The full 1500 was paid out during the merge's claim-out step.
+        assert_eq!(token.balance(&beneficiary), 1500);
+
+        // The call still succeeds and writes a degenerate, already-fully-
+        // claimed schedule rather than erroring — an error here would have
+        // rolled back the payout above under Soroban's all-or-nothing
+        // transaction semantics, discarding tokens the beneficiary was
+        // legitimately owed.
+        let merged = client.get_schedule(&merged_id);
+        assert_eq!(merged.total_amount, 0);
+        assert_eq!(merged.claimed_amount, 0);
+        assert!(!merged.revoked);
+
+        // Correctly indexed, and both sources are gone from storage.
+        let grantor_ids = client.get_schedules_by_grantor(&grantor);
+        assert!(grantor_ids.contains(&merged_id));
+        let beneficiary_ids = client.get_schedules_by_beneficiary(&beneficiary);
+        assert!(beneficiary_ids.contains(&merged_id));
+        assert!(
+            client.try_get_schedule(&id1).is_err()
+                || client.try_get_schedule(&id1).unwrap().is_err()
+        );
+        assert!(
+            client.try_get_schedule(&id2).is_err()
+                || client.try_get_schedule(&id2).unwrap().is_err()
+        );
+    }
+
     /// Build a synthetic Linear `VestingSchedule` for pure-math fuzzing.
     /// Never registers a contract, so constructing and dropping the `Env`
     /// here writes no `test_snapshots/*.json` file (see
