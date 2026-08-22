@@ -117,6 +117,11 @@ pub enum DelegationKey {
     Delegation(u64, u32),
     /// Monotonic delegation-id counter for a schedule, keyed by schedule_id.
     DelegationCount(u64),
+    /// Count of currently active (non-revoked) delegations for a schedule,
+    /// keyed by schedule_id. Maintained incrementally by `create_delegation`
+    /// and `revoke_delegation` so the concurrency cap can be enforced in
+    /// O(1) instead of scanning every historical delegation ever created.
+    ActiveDelegationCount(u64),
 }
 
 /// Maximum number of concurrently active (non-revoked) delegations a
@@ -2515,32 +2520,25 @@ impl VestFlowContract {
             );
         }
 
+        // Active-delegation count is maintained incrementally (see
+        // `DelegationKey::ActiveDelegationCount`) rather than scanned here,
+        // so the concurrency cap check stays O(1) regardless of how many
+        // delegations (revoked or not) this schedule has accumulated over
+        // its lifetime.
+        let active: u32 = env
+            .storage()
+            .instance()
+            .get(&DelegationKey::ActiveDelegationCount(schedule_id))
+            .unwrap_or(0);
+        if active >= MAX_DELEGATIONS_PER_SCHEDULE {
+            return Err(VestFlowError::TooManyDelegations);
+        }
+
         let count: u32 = env
             .storage()
             .instance()
             .get(&DelegationKey::DelegationCount(schedule_id))
             .unwrap_or(0);
-
-        // Count active (non-revoked) delegations against the concurrency cap.
-        let mut active: u32 = 0;
-        for id in 1..=count {
-            if let Some(existing) = env
-                .storage()
-                .instance()
-                .get::<DelegationKey, ClaimDelegation>(&DelegationKey::Delegation(
-                    schedule_id,
-                    id,
-                ))
-            {
-                if !existing.revoked {
-                    active += 1;
-                }
-            }
-        }
-        if active >= MAX_DELEGATIONS_PER_SCHEDULE {
-            return Err(VestFlowError::TooManyDelegations);
-        }
-
         let delegation_id = count + 1;
         let delegation = ClaimDelegation {
             delegate: delegate.clone(),
@@ -2557,6 +2555,10 @@ impl VestFlowContract {
         env.storage().instance().set(
             &DelegationKey::DelegationCount(schedule_id),
             &delegation_id,
+        );
+        env.storage().instance().set(
+            &DelegationKey::ActiveDelegationCount(schedule_id),
+            &(active + 1),
         );
 
         env.events().publish(
@@ -2609,6 +2611,18 @@ impl VestFlowContract {
         env.storage().instance().set(
             &DelegationKey::Delegation(schedule_id, delegation_id),
             &delegation,
+        );
+
+        // Free a slot in the O(1) concurrency-cap counter (see
+        // `DelegationKey::ActiveDelegationCount` / `create_delegation`).
+        let active: u32 = env
+            .storage()
+            .instance()
+            .get(&DelegationKey::ActiveDelegationCount(schedule_id))
+            .unwrap_or(0);
+        env.storage().instance().set(
+            &DelegationKey::ActiveDelegationCount(schedule_id),
+            &active.saturating_sub(1),
         );
 
         env.events().publish(
@@ -5889,8 +5903,7 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
-    fn test_claim_as_delegate_wrong_delegate_panics() {
+    fn test_claim_as_delegate_wrong_delegate_rejected() {
         let env = Env::default();
         env.mock_all_auths();
         let (client, grantor, beneficiary, token_addr, _) = setup(&env);
@@ -5904,7 +5917,12 @@ mod test {
         set_time(&env, 500);
         // `attacker` is not the stored delegate for this delegation, so this
         // must be rejected even though attacker's own auth is mocked/valid.
-        client.claim_as_delegate(&attacker, &id, &delegation_id);
+        // Asserting the exact error (rather than a bare #[should_panic])
+        // ensures a regression that makes this fail for the wrong reason
+        // (e.g. an auth panic instead of the NotDelegate business-logic
+        // check) is caught rather than silently passing.
+        let result = client.try_claim_as_delegate(&attacker, &id, &delegation_id);
+        assert_eq!(result, Err(Ok(VestFlowError::NotDelegate)));
     }
 
     #[test]

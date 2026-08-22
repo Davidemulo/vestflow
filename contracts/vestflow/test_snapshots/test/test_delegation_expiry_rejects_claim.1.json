@@ -255,6 +255,21 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "ActiveDelegationCount"
+                            },
+                            {
+                              "u64": 1
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 1
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "BeneficiarySchedules"
                             },
                             {
