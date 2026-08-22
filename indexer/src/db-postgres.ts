@@ -25,11 +25,14 @@ export function getPool(): Pool {
 }
 
 export async function initializeSchema(): Promise<void> {
-  const schemaPath = path.join(__dirname, "..", "migrations", "001_postgresql_schema.sql");
-  const schema = fs.readFileSync(schemaPath, "utf8");
+  const migrationsDir = path.join(__dirname, "..", "migrations");
+  const files = ["001_postgresql_schema.sql", "002_proposal_events.sql"];
   const client = await getPool().connect();
   try {
-    await client.query(schema);
+    for (const file of files) {
+      const schema = fs.readFileSync(path.join(migrationsDir, file), "utf8");
+      await client.query(schema);
+    }
   } finally {
     client.release();
   }

@@ -23,6 +23,10 @@ export type {
   VestflowConfig,
   CreateScheduleParams,
   CreateGradedScheduleParams,
+  ProposeScheduleParams,
+  ScheduleProposal,
+  ProposalState,
   GradedMilestone,
   VestingKind,
+  ClaimDelegation,
 } from "./types";
