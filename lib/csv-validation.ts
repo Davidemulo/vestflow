@@ -4,9 +4,10 @@
 // cliff_days,kind,revocable (cliff_days and revocable are optional).
 
 import { StrKey } from "@stellar/stellar-sdk";
-import { xlmToStroops } from "@/lib/stellar";
+import { xlmToStroops } from "@/lib/stroops";
 
 export const MAX_BULK_CREATE_ROWS = 500;
+export const BULK_CREATE_BATCH_SIZE = 50;
 
 export type ScheduleKind = "Linear" | "Cliff" | "LinearWithCliff";
 const VALID_KINDS = new Set<ScheduleKind>(["Linear", "Cliff", "LinearWithCliff"]);
@@ -117,20 +118,18 @@ function validateRow(raw: RawCsvRow): string[] {
     errors.push("token: must be a valid Stellar C-address.");
   }
 
-  let amountStroops: bigint | null = null;
   if (!raw.amount_xlm) {
     errors.push("amount_xlm: required.");
   } else if (!/^[0-9]+(?:\.[0-9]+)?$/.test(raw.amount_xlm) || Number(raw.amount_xlm) <= 0) {
     errors.push("amount_xlm: must be a positive decimal number.");
   } else {
     try {
-      amountStroops = xlmToStroops(raw.amount_xlm);
+      xlmToStroops(raw.amount_xlm);
     } catch {
       errors.push("amount_xlm: could not be converted to stroops (overflow or invalid format).");
     }
   }
 
-  let startTime: number | null = null;
   if (!raw.start_time_iso) {
     errors.push("start_time_iso: required.");
   } else {
@@ -139,8 +138,6 @@ function validateRow(raw: RawCsvRow): string[] {
       errors.push("start_time_iso: must be a parseable ISO 8601 timestamp.");
     } else if (parsed <= Date.now()) {
       errors.push("start_time_iso: must be in the future.");
-    } else {
-      startTime = Math.floor(parsed / 1000);
     }
   }
 
@@ -287,4 +284,19 @@ export function splitByAvailableBalance(
   }
 
   return { fundable, unfundable };
+}
+
+/**
+ * Splits rows into fixed-size chunks for batch-shaped submission/progress UI.
+ * Note: Soroban only allows one invokeHostFunction operation per Stellar
+ * transaction, so each row within a "batch" is still submitted as its own
+ * transaction/signature — batching here is a UI/progress grouping, not a
+ * single on-chain transaction.
+ */
+export function chunkRows<T>(rows: T[], size: number = BULK_CREATE_BATCH_SIZE): T[][] {
+  const chunks: T[][] = [];
+  for (let i = 0; i < rows.length; i += size) {
+    chunks.push(rows.slice(i, i + size));
+  }
+  return chunks;
 }

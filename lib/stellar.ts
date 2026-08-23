@@ -14,6 +14,9 @@ import {
   isConnected,
   requestAccess,
 } from "@stellar/freighter-api";
+import { xlmToStroops } from "@/lib/stroops";
+
+export { xlmToStroops } from "@/lib/stroops";
 
 export const NETWORK = process.env.NEXT_PUBLIC_NETWORK === "mainnet" ? "mainnet" : "testnet";
 export const NETWORK_PASSPHRASE = NETWORK === "mainnet" ? Networks.PUBLIC : Networks.TESTNET;
@@ -54,22 +57,23 @@ const XLM_MIN_RESERVE_STROOPS = 10_000_000n; // 1 XLM
 /**
  * Fetch the spendable XLM balance for a Stellar public key.
  *
- * Returns the native balance minus the Stellar minimum reserve so callers
- * can compare it against a requested amount without risking a reserve error.
- * Returns 0n if the account has no native balance or does not exist.
+ * Queries the native XLM Stellar Asset Contract's SEP-41 `balance` method
+ * (the RPC server's plain `getAccount` doesn't expose Horizon-style balances),
+ * then subtracts the Stellar minimum reserve so callers can compare it against
+ * a requested amount without risking a reserve error. Returns 0n if the
+ * account has no native balance or does not exist.
  *
  * @param publicKey - Stellar G-address to query.
  */
 export async function getWalletXlmBalance(publicKey: string): Promise<bigint> {
   try {
-    const account = await server.getAccount(publicKey);
-    const nativeBalance = ((account as any).balances as any[]).find(
-      (b: any) => b.asset_type === "native"
+    const val = await simulate(
+      "balance",
+      [nativeToScVal(publicKey, { type: "address" })],
+      publicKey,
+      NATIVE_TOKEN
     );
-    if (!nativeBalance) return 0n;
-    // Stellar balances are returned as decimal strings (e.g. "1234.5678901")
-    // with 7 decimal places of precision. Convert to stroops.
-    const stroops = xlmToStroops(nativeBalance.balance);
+    const stroops = scValToNative(val) as bigint;
     const spendable = stroops > XLM_MIN_RESERVE_STROOPS
       ? stroops - XLM_MIN_RESERVE_STROOPS
       : 0n;
@@ -81,8 +85,13 @@ export async function getWalletXlmBalance(publicKey: string): Promise<bigint> {
 
 // ---------- Read ----------
 
-async function simulate(method: string, args: xdr.ScVal[], publicKey?: string): Promise<xdr.ScVal> {
-  const contract = new Contract(CONTRACT_ID);
+async function simulate(
+  method: string,
+  args: xdr.ScVal[],
+  publicKey?: string,
+  contractId: string = CONTRACT_ID
+): Promise<xdr.ScVal> {
+  const contract = new Contract(contractId);
   const source = publicKey ?? FALLBACK_ACCOUNT;
   const account = await server.getAccount(source);
   const tx = new TransactionBuilder(account, {
@@ -346,15 +355,37 @@ async function buildAndSend(publicKey: string, method: string, args: xdr.ScVal[]
   return submitted.hash;
 }
 
-export function xlmToStroops(amountXlm: string): bigint {
-  const normalized = amountXlm.trim();
-  if (!/^[0-9]+(?:\.[0-9]+)?$/.test(normalized)) {
-    throw new Error("Invalid amount");
-  }
+function buildCreateScheduleArgs(
+  publicKey: string,
+  beneficiary: string,
+  totalAmountXlm: string,
+  tokenAddress: string,
+  startTime: number,
+  durationDays: number,
+  cliffDays: number,
+  kind: "Linear" | "Cliff" | "LinearWithCliff",
+  revocable: boolean,
+  lockupDays: number = cliffDays
+): xdr.ScVal[] {
+  const totalStroops = xlmToStroops(totalAmountXlm);
+  const durationSecs = durationDays * 86400;
+  const cliffSecs = cliffDays * 86400;
+  const lockupSecs = lockupDays * 86400;
 
-  const [whole, fraction = ""] = normalized.split(".");
-  const fractionPadded = (fraction + "0000000").slice(0, 7);
-  return BigInt(whole) * 10_000_000n + BigInt(fractionPadded);
+  const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(kind)]);
+
+  return [
+    nativeToScVal(publicKey, { type: "address" }),
+    nativeToScVal(beneficiary, { type: "address" }),
+    nativeToScVal(tokenAddress || NATIVE_TOKEN, { type: "address" }),
+    nativeToScVal(totalStroops, { type: "i128" }),
+    nativeToScVal(startTime, { type: "u64" }),
+    nativeToScVal(durationSecs, { type: "u64" }),
+    nativeToScVal(cliffSecs, { type: "u64" }),
+    nativeToScVal(lockupSecs, { type: "u64" }),
+    kindVal,
+    nativeToScVal(revocable, { type: "bool" }),
+  ];
 }
 
 export async function createSchedule(
@@ -369,26 +400,66 @@ export async function createSchedule(
   revocable: boolean,
   lockupDays: number = cliffDays
 ): Promise<string> {
-  const totalStroops = xlmToStroops(totalAmountXlm);
-  const durationSecs = durationDays * 86400;
-  const cliffSecs = cliffDays * 86400;
-  const lockupSecs = lockupDays * 86400;
-
-  const kindVal = xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(kind)]);
-
-  const args: xdr.ScVal[] = [
-    nativeToScVal(publicKey, { type: "address" }),
-    nativeToScVal(beneficiary, { type: "address" }),
-    nativeToScVal(tokenAddress || NATIVE_TOKEN, { type: "address" }),
-    nativeToScVal(totalStroops, { type: "i128" }),
-    nativeToScVal(startTime, { type: "u64" }),
-    nativeToScVal(durationSecs, { type: "u64" }),
-    nativeToScVal(cliffSecs, { type: "u64" }),
-    nativeToScVal(lockupSecs, { type: "u64" }),
-    kindVal,
-    nativeToScVal(revocable, { type: "bool" }),
-  ];
+  const args = buildCreateScheduleArgs(
+    publicKey,
+    beneficiary,
+    totalAmountXlm,
+    tokenAddress,
+    startTime,
+    durationDays,
+    cliffDays,
+    kind,
+    revocable,
+    lockupDays
+  );
   return buildAndSend(publicKey, "create_schedule", args);
+}
+
+/**
+ * Simulates a single `create_schedule` invocation and returns its total
+ * estimated fee in stroops (inclusion + Soroban resource fee), without
+ * signing or submitting anything. Used to preview costs before a bulk
+ * submission — Soroban only allows one invokeHostFunction op per
+ * transaction, so this is a per-schedule (not per-batch) estimate.
+ */
+export async function estimateCreateScheduleFee(
+  publicKey: string,
+  beneficiary: string,
+  totalAmountXlm: string,
+  tokenAddress: string,
+  startTime: number,
+  durationDays: number,
+  cliffDays: number,
+  kind: "Linear" | "Cliff" | "LinearWithCliff",
+  revocable: boolean,
+  lockupDays: number = cliffDays
+): Promise<bigint> {
+  const args = buildCreateScheduleArgs(
+    publicKey,
+    beneficiary,
+    totalAmountXlm,
+    tokenAddress,
+    startTime,
+    durationDays,
+    cliffDays,
+    kind,
+    revocable,
+    lockupDays
+  );
+  const contract = new Contract(CONTRACT_ID);
+  const account = await server.getAccount(publicKey);
+  const tx = new TransactionBuilder(account, {
+    fee: BASE_FEE,
+    networkPassphrase: NETWORK_PASSPHRASE,
+  })
+    .addOperation(contract.call("create_schedule", ...args))
+    .setTimeout(30)
+    .build();
+
+  const simResult = await server.simulateTransaction(tx);
+  if (StellarRpc.Api.isSimulationError(simResult)) throw new Error((simResult as any).error);
+  const assembled = StellarRpc.assembleTransaction(tx, simResult as any).build();
+  return BigInt(assembled.fee);
 }
 
 export async function claimVested(publicKey: string, scheduleId: number): Promise<string> {
