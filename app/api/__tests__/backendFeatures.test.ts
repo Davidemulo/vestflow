@@ -19,6 +19,9 @@ vi.mock("@/lib/stellar", () => ({
   CONTRACT_ID: "CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEBQ2FSAEVGRJ5TXAZWCX",
   getSchedulesByGrantor: vi.fn().mockResolvedValue([1]),
   getSchedulesByBeneficiary: vi.fn().mockResolvedValue([]),
+  // /api/schedules resolves ids through the *_ScheduleIds views.
+  getGrantorScheduleIds: vi.fn().mockResolvedValue([1]),
+  getBeneficiaryScheduleIds: vi.fn().mockResolvedValue([]),
   getScheduleBatch: vi.fn().mockResolvedValue([
     {
       id: 1,
@@ -30,9 +33,15 @@ vi.mock("@/lib/stellar", () => ({
       start_time: 1700000000,
       duration: 864000,
       cliff_duration: 86400,
+      lockup_duration: 0,
       kind: "Linear",
       revocable: true,
       revoked: false,
+      paused: false,
+      paused_duration: 0,
+      paused_at: 0,
+      vested_at_revoke: 0n,
+      milestones: [],
     },
   ]),
   getClaimableBulk: vi.fn().mockResolvedValue([100000000n]),

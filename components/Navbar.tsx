@@ -117,6 +117,7 @@ export default function Navbar() {
       {/* Desktop nav links */}
       <div className="hidden md:flex items-center gap-8 text-sm text-zinc-400">
         <Link href="/app" className="hover:text-white transition-colors">Dashboard</Link>
+        <Link href="/app/portfolio" className="hover:text-white transition-colors">Portfolio</Link>
         <Link href="/app/history" className="hover:text-white transition-colors">History</Link>
         <Link href="/app/beneficiary" className="hover:text-white transition-colors">Beneficiary</Link>
         <Link href="/app/create" className="hover:text-white transition-colors">New Schedule</Link>
@@ -259,6 +260,7 @@ export default function Navbar() {
       {menuOpen && (
         <div className="absolute top-full left-0 right-0 flex flex-col gap-2 px-4 py-4 border-b border-white/5 bg-[#08090f]/95 backdrop-blur-md md:hidden">
           <Link href="/app" onClick={() => setMenuOpen(false)} className="text-sm text-zinc-400 hover:text-white transition-colors py-2">Dashboard</Link>
+          <Link href="/app/portfolio" onClick={() => setMenuOpen(false)} className="text-sm text-zinc-400 hover:text-white transition-colors py-2">Portfolio</Link>
           <Link href="/app/history" onClick={() => setMenuOpen(false)} className="text-sm text-zinc-400 hover:text-white transition-colors py-2">History</Link>
           <Link href="/app/beneficiary" onClick={() => setMenuOpen(false)} className="text-sm text-zinc-400 hover:text-white transition-colors py-2">Beneficiary</Link>
           <Link href="/app/create" onClick={() => setMenuOpen(false)} className="text-sm text-zinc-400 hover:text-white transition-colors py-2">New Schedule</Link>

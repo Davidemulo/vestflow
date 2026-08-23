@@ -10,6 +10,9 @@
     "bindings:generate": "bash scripts/generate-bindings.sh",
     "bindings:build": "npm --prefix lib/bindings/vestflow install && npm --prefix lib/bindings/vestflow run build",
     "test": "vitest run",
+    "worker:build": "tsup --config workers/tsup.config.ts",
+    "prebuild": "npm run worker:build",
+    "predev": "npm run worker:build",
     "dev:reset": "bash scripts/dev-reset.sh",
     "lint": "eslint .",
     "doctor": "node scripts/doctor.js"
