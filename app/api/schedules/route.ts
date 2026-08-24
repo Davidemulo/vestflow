@@ -11,6 +11,15 @@ import { NextRequest, NextResponse } from "next/server";
 
 const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
+/**
+ * Upper bound on `limit`.
+ *
+ * The portfolio timeline renders every schedule at once rather than paging, so
+ * it asks for a large page; the cap keeps a hand-crafted request from turning
+ * into an unbounded batch simulation.
+ */
+const MAX_LIMIT = 500;
+
 function vestedAmount(schedule: {
   total_amount: bigint;
   claimed: bigint;
@@ -52,13 +61,27 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    const address = request.nextUrl.searchParams.get("address");
+    // `address` returns both roles; `grantor` / `beneficiary` narrow to one
+    // side, which is what the portfolio timeline fetches in parallel.
+    const grantorParam = request.nextUrl.searchParams.get("grantor");
+    const beneficiaryParam = request.nextUrl.searchParams.get("beneficiary");
+    const addressParam = request.nextUrl.searchParams.get("address");
+    const address = addressParam ?? grantorParam ?? beneficiaryParam;
     const pageParam = request.nextUrl.searchParams.get("page");
     const limitParam = request.nextUrl.searchParams.get("limit");
 
     if (!address) {
       return NextResponse.json(
-        { error: "Missing required query parameter: address" },
+        { error: "Missing required query parameter: address, grantor or beneficiary" },
+        { status: 400 }
+      );
+    }
+
+    // Both role params at once is only meaningful for the same wallet; two
+    // different addresses would silently query just one of them.
+    if (grantorParam && beneficiaryParam && grantorParam !== beneficiaryParam) {
+      return NextResponse.json(
+        { error: "grantor and beneficiary must refer to the same address" },
         { status: 400 }
       );
     }
@@ -72,10 +95,21 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     }
 
     const page = pageParam ? Math.max(1, parseInt(pageParam, 10)) : 1;
-    const limit = limitParam ? Math.max(1, parseInt(limitParam, 10)) : 20;
+    const limit = limitParam
+      ? Math.min(MAX_LIMIT, Math.max(1, parseInt(limitParam, 10)))
+      : 20;
 
-    const grantorIds = await getGrantorScheduleIds(address);
-    const beneficiaryIds = await getBeneficiaryScheduleIds(address);
+    // Only fetch the side that was asked for — a grantor-only query should not
+    // pay for the beneficiary index lookup. `address` keeps its both-roles
+    // meaning.
+    const roleScoped = addressParam === null;
+    const wantsGrantor = !roleScoped || grantorParam !== null;
+    const wantsBeneficiary = !roleScoped || beneficiaryParam !== null;
+
+    const grantorIds = wantsGrantor ? await getGrantorScheduleIds(address) : [];
+    const beneficiaryIds = wantsBeneficiary
+      ? await getBeneficiaryScheduleIds(address)
+      : [];
     const ids = Array.from(new Set([...grantorIds, ...beneficiaryIds])).sort(
       (a, b) => a - b
     );
@@ -118,6 +152,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
             kind: s.kind,
             revocable: s.revocable,
             revoked: s.revoked,
+            // Fields below let a client project the schedule forward itself
+            // (the portfolio timeline recomputes claimable at an arbitrary
+            // cursor without another round-trip).
+            lockup_duration: s.lockup_duration,
+            paused: s.paused,
+            paused_duration: s.paused_duration,
+            paused_at: s.paused_at,
+            vested_at_revoke: s.vested_at_revoke.toString(),
+            milestones: s.milestones ?? [],
             vestedAmount: vested.toString(),
             claimableAmount: claimable.toString(),
           };

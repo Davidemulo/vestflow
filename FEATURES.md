@@ -424,6 +424,35 @@ Link to public schedule views to give beneficiaries an easy way to check their v
 
 ---
 
+### 📈 Portfolio Vesting Timeline (#566)
+
+**Description**: `/app/portfolio` draws every schedule the connected wallet is party to — as grantor, as beneficiary, or both — as rows on a single interactive canvas timeline. A draggable time cursor re-projects each schedule's claimable amount in real time, and clicking a row opens a detail drawer.
+
+**How to Use**:
+1. Connect your wallet and open **Portfolio** from the navbar.
+2. Drag the time axis (or the red cursor line) to scrub through time; every row's projected claimable amount updates as you drag.
+3. Drag a row to pan, hold <kbd>Shift</kbd>/<kbd>Ctrl</kbd> while scrolling to zoom, and use **Fit** to frame the whole portfolio again.
+4. Click a row to open its detail drawer, or use the arrow keys and <kbd>Enter</kbd> from the keyboard.
+
+**Features**:
+- One `<canvas>` for the whole portfolio with virtualised rows — only the rows inside the viewport are drawn each frame, so 200+ schedules paint in well under 100 ms
+- Repaints are pull-based: interaction sets a dirty flag and a `requestAnimationFrame` loop redraws only when needed
+- Cursor recalculation runs in a Web Worker (`workers/claimable-calculator.worker.ts`), keeping a drag at 60 fps; 200 schedules are re-projected in well under one 16 ms frame
+- Per-kind visual treatments on the same row height budget: hatched cliff periods, a gradient vesting body, tick markers at each graded tranche, and one sub-row per token on multi-token schedules
+- Hit-testing by binary search over row positions, so clicks resolve in ~8 comparisons regardless of portfolio size
+- Pan and zoom via a single float transform, correct from a one-hour view out to five years, with off-screen spans clipped so canvas coordinates never overflow
+- Canvas colours read from the app's CSS custom properties, so the timeline follows the light and dark themes
+- Honours `prefers-reduced-motion`: the cursor snaps instead of easing and the loading skeleton stops shimmering
+- Falls back to computing on the main thread wherever a Web Worker is unavailable
+
+**Routes**:
+- `/app/portfolio` — the timeline page
+- `GET /api/schedules?grantor=<address>` and `GET /api/schedules?beneficiary=<address>` — role-scoped schedule lists, fetched in parallel and merged by schedule id
+
+**Build note**: the worker is bundled to `public/workers/` by `npm run worker:build`, which `prebuild` and `predev` run automatically.
+
+---
+
 ## Future Enhancements
 
 Potential improvements for future releases:

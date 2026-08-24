@@ -11,6 +11,7 @@ const eslintConfig = [
       "test_snapshots/**",
       ".next/**",
       "node_modules/**",
+      "public/workers/**",
     ],
   },
   {
