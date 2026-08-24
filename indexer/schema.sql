@@ -230,3 +230,51 @@ CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_due
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_registration
   ON webhook_deliveries (registration_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event ON webhook_deliveries (event_id);
+
+-- ── Materialized analytics snapshots ────────────────────────────────────
+-- Incrementally folded in by the materialization worker (analytics.ts)
+-- after each processed ledger batch. Mirrors migrations/004_analytics_snapshots.sql
+-- so both deployment targets (SQLite here, Postgres there) expose the same
+-- columns and the same query semantics for the /analytics/* endpoints.
+
+CREATE TABLE IF NOT EXISTS schedule_daily_snapshots (
+  schedule_id           INTEGER NOT NULL,
+  day                   TEXT    NOT NULL, -- YYYY-MM-DD
+  total_vested_stroops  TEXT    NOT NULL DEFAULT '0', -- bigint as string
+  total_claimed_stroops TEXT    NOT NULL DEFAULT '0',
+  claimable_stroops     TEXT    NOT NULL DEFAULT '0',
+  locked_stroops        TEXT    NOT NULL DEFAULT '0',
+  PRIMARY KEY (schedule_id, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_schedule_daily_snapshots_day ON schedule_daily_snapshots (day);
+CREATE INDEX IF NOT EXISTS idx_schedule_daily_snapshots_schedule ON schedule_daily_snapshots (schedule_id);
+
+CREATE TABLE IF NOT EXISTS token_daily_tvl (
+  token_address         TEXT NOT NULL,
+  day                   TEXT NOT NULL, -- YYYY-MM-DD
+  total_locked_stroops  TEXT NOT NULL DEFAULT '0',
+  active_schedule_count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (token_address, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_token_daily_tvl_day ON token_daily_tvl (day);
+
+CREATE TABLE IF NOT EXISTS grantor_daily_stats (
+  grantor_address           TEXT NOT NULL,
+  day                       TEXT NOT NULL, -- YYYY-MM-DD
+  active_schedule_count     INTEGER NOT NULL DEFAULT 0,
+  total_distributed_stroops TEXT NOT NULL DEFAULT '0',
+  PRIMARY KEY (grantor_address, day)
+);
+
+CREATE INDEX IF NOT EXISTS idx_grantor_daily_stats_day ON grantor_daily_stats (day);
+
+-- Highest ledger already folded into the snapshot tables, per network.
+-- Lets the materialization worker fold in only the newest events on each
+-- run instead of rescanning schedule_events from scratch.
+CREATE TABLE IF NOT EXISTS analytics_watermark (
+  network              TEXT PRIMARY KEY,
+  last_ledger          INTEGER NOT NULL DEFAULT 0,
+  last_materialized_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
