@@ -246,3 +246,121 @@ export async function getScheduleIdsByBeneficiary(beneficiary: string): Promise<
   );
   return result.rows.map((row: any) => row.schedule_id);
 }
+
+// ── Materialized analytics snapshots ────────────────────────────────────
+// Mirrors the query surface in db.ts (SQLite) against the tables added by
+// migrations/004_analytics_snapshots.sql, so the /analytics/* handlers in
+// server.ts can run unmodified against either backend once a Postgres-backed
+// materialization worker is wired up (schedule_created/claimed/revoked here
+// are split across vesting_schedules/claim_events/revoke_events rather than
+// a single events table, so that worker folds across three tables instead
+// of one — see analytics.ts for the SQLite fold this should mirror).
+
+export interface PgScheduleDailySnapshotRow {
+  schedule_id: number;
+  day: string;
+  total_vested_stroops: string;
+  total_claimed_stroops: string;
+  claimable_stroops: string;
+  locked_stroops: string;
+}
+
+export async function upsertScheduleDailySnapshot(row: PgScheduleDailySnapshotRow): Promise<void> {
+  await getPool().query(
+    `INSERT INTO schedule_daily_snapshots
+      (schedule_id, day, total_vested_stroops, total_claimed_stroops, claimable_stroops, locked_stroops)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (schedule_id, day) DO UPDATE SET
+       total_vested_stroops = EXCLUDED.total_vested_stroops,
+       total_claimed_stroops = EXCLUDED.total_claimed_stroops,
+       claimable_stroops = EXCLUDED.claimable_stroops,
+       locked_stroops = EXCLUDED.locked_stroops`,
+    [row.schedule_id, row.day, row.total_vested_stroops, row.total_claimed_stroops, row.claimable_stroops, row.locked_stroops]
+  );
+}
+
+export async function queryScheduleDailySnapshots(
+  scheduleId: number,
+  from: string,
+  to: string
+): Promise<PgScheduleDailySnapshotRow[]> {
+  const result = await getPool().query(
+    `SELECT schedule_id, day::text, total_vested_stroops::text, total_claimed_stroops::text,
+            claimable_stroops::text, locked_stroops::text
+     FROM schedule_daily_snapshots
+     WHERE schedule_id = $1 AND day >= $2 AND day <= $3
+     ORDER BY day ASC`,
+    [scheduleId, from, to]
+  );
+  return result.rows;
+}
+
+export interface PgTokenDailyTvlRow {
+  token_address: string;
+  day: string;
+  total_locked_stroops: string;
+  active_schedule_count: number;
+}
+
+export async function upsertTokenDailyTvl(row: PgTokenDailyTvlRow): Promise<void> {
+  await getPool().query(
+    `INSERT INTO token_daily_tvl (token_address, day, total_locked_stroops, active_schedule_count)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (token_address, day) DO UPDATE SET
+       total_locked_stroops = EXCLUDED.total_locked_stroops,
+       active_schedule_count = EXCLUDED.active_schedule_count`,
+    [row.token_address, row.day, row.total_locked_stroops, row.active_schedule_count]
+  );
+}
+
+export async function queryTokenDailyTvl(
+  token: string,
+  from: string,
+  to: string
+): Promise<PgTokenDailyTvlRow[]> {
+  const result = await getPool().query(
+    `SELECT token_address, day::text, total_locked_stroops::text, active_schedule_count
+     FROM token_daily_tvl
+     WHERE token_address = $1 AND day >= $2 AND day <= $3
+     ORDER BY day ASC`,
+    [token, from, to]
+  );
+  return result.rows;
+}
+
+export interface PgGrantorDailyStatsRow {
+  grantor_address: string;
+  day: string;
+  active_schedule_count: number;
+  total_distributed_stroops: string;
+}
+
+export async function upsertGrantorDailyStats(row: PgGrantorDailyStatsRow): Promise<void> {
+  await getPool().query(
+    `INSERT INTO grantor_daily_stats (grantor_address, day, active_schedule_count, total_distributed_stroops)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (grantor_address, day) DO UPDATE SET
+       active_schedule_count = EXCLUDED.active_schedule_count,
+       total_distributed_stroops = EXCLUDED.total_distributed_stroops`,
+    [row.grantor_address, row.day, row.active_schedule_count, row.total_distributed_stroops]
+  );
+}
+
+export async function getAnalyticsWatermark(network: string): Promise<number> {
+  const result = await getPool().query(
+    "SELECT last_ledger FROM analytics_watermark WHERE network = $1",
+    [network]
+  );
+  return Number(result.rows[0]?.last_ledger ?? 0);
+}
+
+export async function setAnalyticsWatermark(network: string, ledger: number): Promise<void> {
+  await getPool().query(
+    `INSERT INTO analytics_watermark (network, last_ledger, last_materialized_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (network) DO UPDATE SET
+       last_ledger = EXCLUDED.last_ledger,
+       last_materialized_at = EXCLUDED.last_materialized_at`,
+    [network, ledger]
+  );
+}
