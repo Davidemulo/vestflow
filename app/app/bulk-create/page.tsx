@@ -184,6 +184,20 @@ export default function BulkCreatePage() {
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       setResults((r) => ({ ...r, [row.rowIndex]: { status: "pending" } }));
+
+      if (row.startTime <= Math.floor(Date.now() / 1000)) {
+        setResults((r) => ({
+          ...r,
+          [row.rowIndex]: {
+            status: "error",
+            message: "start_time_iso has passed since upload — re-upload or fix this row's date.",
+          },
+        }));
+        failed++;
+        setBatchProgress((p) => ({ ...p, done: i + 1 }));
+        continue;
+      }
+
       try {
         await createSchedule(
           publicKey,
@@ -379,7 +393,9 @@ export default function BulkCreatePage() {
                         >
                           <span className="text-zinc-300">
                             Batch {i + 1}: {batch.length} schedule{batch.length !== 1 ? "s" : ""}
-                            {fee !== undefined && <> · est. fee {stroopsToXlm(fee)} XLM</>}
+                            {fee !== undefined && (
+                              <> · ≈ {stroopsToXlm(fee)} XLM (estimated from first row)</>
+                            )}
                           </span>
                           <span className="flex items-center gap-3">
                             {isActive && (
