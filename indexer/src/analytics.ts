@@ -28,7 +28,10 @@ import {
   upsertTokenDailyTvl,
   upsertGrantorDailyStats,
   runInTransaction,
+  queryScheduleDailySnapshots,
+  queryTokenDailyTvl,
   type RawScheduleEventRow,
+  type ScheduleDailySnapshotRow,
 } from "./db";
 import type { NetworkName } from "./config";
 
@@ -318,6 +321,131 @@ function recomputeTokenTvl(tokens: Set<string>, today: string, network?: Network
       network
     );
   }
+}
+
+// ── Query helpers backing the /analytics/* endpoints ────────────────────
+
+export interface TvlPoint {
+  day: string;
+  total_locked_stroops: string;
+  active_schedule_count: number;
+}
+
+/**
+ * Daily TVL for a token over [from, to]. With `cumulative`, returns a
+ * running total of `total_locked_stroops` instead of the per-day balance —
+ * computed in application code rather than a SQL window function so the
+ * same code path works identically on SQLite and Postgres.
+ */
+export function getTvlSeries(
+  token: string,
+  from: string,
+  to: string,
+  cumulative: boolean,
+  network?: NetworkName
+): TvlPoint[] {
+  const rows = queryTokenDailyTvl(token, from, to, network);
+  if (!cumulative) {
+    return rows.map((r) => ({
+      day: r.day,
+      total_locked_stroops: r.total_locked_stroops,
+      active_schedule_count: r.active_schedule_count,
+    }));
+  }
+
+  let running = 0n;
+  return rows.map((r) => {
+    running += BigInt(r.total_locked_stroops);
+    return { day: r.day, total_locked_stroops: running.toString(), active_schedule_count: r.active_schedule_count };
+  });
+}
+
+export interface ScheduleHistoryPoint {
+  day: string;
+  vested: string;
+  claimed: string;
+  claimable: string;
+  locked: string;
+}
+
+/**
+ * Daily {vested, claimed, claimable, locked} for a schedule over
+ * [from, to], gap-filled: a day with no materialized row (nothing changed
+ * that day) repeats the last known values instead of leaving a hole.
+ */
+export function getScheduleHistory(
+  scheduleId: number,
+  from: string,
+  to: string,
+  network?: NetworkName
+): ScheduleHistoryPoint[] {
+  const rows = queryScheduleDailySnapshots(scheduleId, from, to, network);
+  const byDay = new Map(rows.map((r) => [r.day, r]));
+
+  let carry: ScheduleDailySnapshotRow | null = getScheduleSnapshotOnOrBefore(scheduleId, from, network);
+  const points: ScheduleHistoryPoint[] = [];
+
+  for (const day of enumerateDays(from, to)) {
+    const row = byDay.get(day) ?? carry;
+    if (row) {
+      carry = row;
+      points.push({
+        day,
+        vested: row.total_vested_stroops,
+        claimed: row.total_claimed_stroops,
+        claimable: row.claimable_stroops,
+        locked: row.locked_stroops,
+      });
+    }
+  }
+
+  return points;
+}
+
+export interface GrantorSummary {
+  grantor_address: string;
+  total_schedules_created: number;
+  total_distributed: string;
+  active_schedules: number;
+  revoked_schedules: number;
+  avg_duration_days: number;
+}
+
+export function getGrantorSummary(grantorAddress: string, network?: NetworkName): GrantorSummary {
+  const scheduleIds = getScheduleIdsForGrantor(grantorAddress, network);
+
+  let totalDistributed = 0n;
+  let activeSchedules = 0;
+  let revokedSchedules = 0;
+  let durationSum = 0;
+  let durationCount = 0;
+
+  for (const scheduleId of scheduleIds) {
+    const history = getEventsForSchedule(scheduleId, network);
+    const state = foldScheduleEvents(history);
+
+    totalDistributed += [...state.claimedByDay.values()].reduce((sum, v) => sum + v, 0n);
+    if (state.revokedAtDay !== null) revokedSchedules++;
+    if (state.vestingParams) {
+      durationSum += state.vestingParams.duration;
+      durationCount++;
+    }
+
+    const today = todayUtc();
+    const latest = getScheduleSnapshotOnOrBefore(scheduleId, today, network);
+    if (latest && !state.revokedAtDay && BigInt(latest.locked_stroops) > 0n) {
+      activeSchedules++;
+    }
+  }
+
+  return {
+    grantor_address: grantorAddress,
+    total_schedules_created: scheduleIds.length,
+    total_distributed: totalDistributed.toString(),
+    active_schedules: activeSchedules,
+    revoked_schedules: revokedSchedules,
+    avg_duration_days: durationCount > 0 ? Math.round(durationSum / durationCount / SECONDS_PER_DAY) : 0,
+  };
 }
 
 function recomputeGrantorStats(grantors: Set<string>, today: string, network?: NetworkName): void {

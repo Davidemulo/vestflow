@@ -17,6 +17,7 @@
 import { rpc as StellarRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
 import { getCheckpoint, setCheckpoint, insertEvent, computeTvlStats, insertBeneficiarySchedule } from "./db";
 import { materialize } from "./analytics";
+import { invalidateToday } from "./analytics-cache";
 import { getNetworkConfig, parseNetwork } from "./config";
 import { WebhookDeliveryWorker, fanOutEvent } from "./webhook-delivery";
 import type { EventType } from "./types";
@@ -299,6 +300,9 @@ async function poll(): Promise<void> {
           `[poller] Analytics: materialized ${result.events_processed} event(s) → ` +
             `${result.schedules_affected} schedule(s), ${result.tokens_affected} token(s), ${result.grantors_affected} grantor(s).`
         );
+        // Today's TVL numbers just changed; historical days are untouched
+        // and stay cached.
+        invalidateToday();
       }
     } catch (err) {
       console.error("[poller] Analytics materialization failed:", err);
