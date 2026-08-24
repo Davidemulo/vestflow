@@ -20,6 +20,7 @@ import type { EventQueryParams } from "./types";
 import { routeWebhookRequest } from "./webhook-api";
 import { getTvlSeries, getScheduleHistory, getGrantorSummary } from "./analytics";
 import { cacheKey, cacheGet, cacheSet } from "./analytics-cache";
+import { getCachedTokenDecimals, getTokenDecimals, stroopsToDisplay } from "./token-metadata";
 
 const PORT = Number(process.env.INDEXER_PORT ?? "3001");
 
@@ -173,16 +174,32 @@ function handleAnalyticsTvl(res: http.ServerResponse, searchParams: URLSearchPar
       return json(res, 400, { error: "from/to must be valid ISO 8601 dates" });
     }
 
+    const network = (searchParams.get("network") ?? "testnet") as "mainnet" | "testnet";
     const cumulative = searchParams.get("cumulative") === "true";
+    // Warm the decimals cache in the background; never blocks the response
+    // (the display conversion below just falls back until it resolves).
+    void getTokenDecimals(token, network);
+    const decimals = getCachedTokenDecimals(token);
+
     const key = cacheKey(token, range.from, range.to, cumulative);
     const cached = cacheGet<ReturnType<typeof getTvlSeries>>(key);
-    if (cached) {
-      return json(res, 200, { token, from: range.from, to: range.to, cumulative, points: cached, cached: true });
-    }
+    const points = cached ?? getTvlSeries(token, range.from, range.to, cumulative);
+    if (!cached) cacheSet(key, points, range.to);
 
-    const points = getTvlSeries(token, range.from, range.to, cumulative);
-    cacheSet(key, points, range.to);
-    json(res, 200, { token, from: range.from, to: range.to, cumulative, points, cached: false });
+    const withDisplay = points.map((p) => ({
+      ...p,
+      total_locked_display: stroopsToDisplay(BigInt(p.total_locked_stroops), decimals),
+    }));
+
+    json(res, 200, {
+      token,
+      from: range.from,
+      to: range.to,
+      cumulative,
+      decimals,
+      points: withDisplay,
+      cached: !!cached,
+    });
   } catch (error) {
     console.error("[server] Analytics TVL error:", error);
     json(res, 500, { error: "Failed to compute TVL series" });
