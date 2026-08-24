@@ -36,6 +36,13 @@ CREATE TABLE IF NOT EXISTS schedule_events (
   cliff_duration INTEGER, -- seconds (0 when the schedule has no cliff)
   vesting_kind  TEXT,     -- 'Linear' | 'LinearWithCliff' | 'Cliff' | 'Graded' | other contract variant
 
+  -- Set once the analytics materialization worker has folded this event
+  -- into schedule_daily_snapshots / token_daily_tvl / grantor_daily_stats.
+  -- NULL means "not yet materialized" — this is how late-arriving replay
+  -- events (inserted out of ledger order) get picked up and targeted at
+  -- their own past day, independent of the highest ledger seen so far.
+  materialized_at INTEGER,
+
   raw_topics TEXT NOT NULL, -- JSON array of native-decoded topic values
   raw_value  TEXT NOT NULL, -- JSON of native-decoded event value
 
@@ -49,6 +56,7 @@ CREATE INDEX IF NOT EXISTS idx_proposal_id  ON schedule_events (proposal_id);
 CREATE INDEX IF NOT EXISTS idx_event_type   ON schedule_events (event_type);
 CREATE INDEX IF NOT EXISTS idx_ledger       ON schedule_events (ledger);
 CREATE INDEX IF NOT EXISTS idx_token        ON schedule_events (token);
+CREATE INDEX IF NOT EXISTS idx_materialized_at ON schedule_events (materialized_at);
 
 -- Singleton checkpoint row — stores the highest fully-processed ledger.
 CREATE TABLE IF NOT EXISTS checkpoint (
