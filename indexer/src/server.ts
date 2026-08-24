@@ -18,6 +18,8 @@ import { URL } from "url";
 import { getCheckpoint, getTvlStats, queryEvents, queryHistory } from "./db";
 import type { EventQueryParams } from "./types";
 import { routeWebhookRequest } from "./webhook-api";
+import { getTvlSeries, getScheduleHistory, getGrantorSummary } from "./analytics";
+import { cacheKey, cacheGet, cacheSet } from "./analytics-cache";
 
 const PORT = Number(process.env.INDEXER_PORT ?? "3001");
 
@@ -137,6 +139,85 @@ function handleHistory(
   }
 }
 
+/** Normalizes an ISO 8601 timestamp or bare date to a YYYY-MM-DD day string. */
+function toDay(value: string): string | null {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
+}
+
+function defaultRange(searchParams: URLSearchParams): { from: string; to: string } | null {
+  const toRaw = searchParams.get("to");
+  const fromRaw = searchParams.get("from");
+
+  const to = toRaw ? toDay(toRaw) : new Date().toISOString().slice(0, 10);
+  if (!to) return null;
+
+  const from = fromRaw
+    ? toDay(fromRaw)
+    : new Date(Date.parse(`${to}T00:00:00.000Z`) - 29 * 86_400_000).toISOString().slice(0, 10);
+  if (!from) return null;
+
+  return { from, to };
+}
+
+function handleAnalyticsTvl(res: http.ServerResponse, searchParams: URLSearchParams): void {
+  try {
+    const token = searchParams.get("token");
+    if (!token) {
+      return json(res, 400, { error: "token query param is required" });
+    }
+
+    const range = defaultRange(searchParams);
+    if (!range) {
+      return json(res, 400, { error: "from/to must be valid ISO 8601 dates" });
+    }
+
+    const cumulative = searchParams.get("cumulative") === "true";
+    const key = cacheKey(token, range.from, range.to, cumulative);
+    const cached = cacheGet<ReturnType<typeof getTvlSeries>>(key);
+    if (cached) {
+      return json(res, 200, { token, from: range.from, to: range.to, cumulative, points: cached, cached: true });
+    }
+
+    const points = getTvlSeries(token, range.from, range.to, cumulative);
+    cacheSet(key, points, range.to);
+    json(res, 200, { token, from: range.from, to: range.to, cumulative, points, cached: false });
+  } catch (error) {
+    console.error("[server] Analytics TVL error:", error);
+    json(res, 500, { error: "Failed to compute TVL series" });
+  }
+}
+
+function handleAnalyticsScheduleHistory(
+  res: http.ServerResponse,
+  scheduleId: number,
+  searchParams: URLSearchParams
+): void {
+  try {
+    const range = defaultRange(searchParams);
+    if (!range) {
+      return json(res, 400, { error: "from/to must be valid ISO 8601 dates" });
+    }
+
+    const points = getScheduleHistory(scheduleId, range.from, range.to);
+    json(res, 200, { schedule_id: scheduleId, from: range.from, to: range.to, points });
+  } catch (error) {
+    console.error("[server] Analytics schedule history error:", error);
+    json(res, 500, { error: "Failed to compute schedule history" });
+  }
+}
+
+function handleAnalyticsGrantorSummary(res: http.ServerResponse, address: string): void {
+  try {
+    const summary = getGrantorSummary(address);
+    json(res, 200, summary);
+  } catch (error) {
+    console.error("[server] Analytics grantor summary error:", error);
+    json(res, 500, { error: "Failed to compute grantor summary" });
+  }
+}
+
 export function createServer(): http.Server {
   return http.createServer(async (req, res) => {
     let url: URL;
@@ -178,6 +259,12 @@ export function createServer(): http.Server {
     const historyMatch = url.pathname.match(
       /^\/schedules\/([A-Z0-9]{56})\/history$/
     );
+    const scheduleAnalyticsMatch = url.pathname.match(
+      /^\/analytics\/schedules\/(\d+)\/history$/
+    );
+    const grantorAnalyticsMatch = url.pathname.match(
+      /^\/analytics\/grantors\/([A-Z0-9]{56})\/summary$/
+    );
 
     switch (url.pathname) {
       case "/health":
@@ -189,9 +276,18 @@ export function createServer(): http.Server {
       case "/stats/tvl":
         return handleTvl(res, url.searchParams);
 
+      case "/analytics/tvl":
+        return handleAnalyticsTvl(res, url.searchParams);
+
       default:
         if (historyMatch) {
           return handleHistory(res, historyMatch[1], url.searchParams);
+        }
+        if (scheduleAnalyticsMatch) {
+          return handleAnalyticsScheduleHistory(res, Number(scheduleAnalyticsMatch[1]), url.searchParams);
+        }
+        if (grantorAnalyticsMatch) {
+          return handleAnalyticsGrantorSummary(res, grantorAnalyticsMatch[1]);
         }
         return json(res, 404, {
           error: "Not found",
@@ -212,5 +308,8 @@ if (typeof require !== "undefined" && require.main === module) {
     );
     console.log("[server]   POST /webhooks (Bearer wallet JWT)");
     console.log("[server]   GET  /webhooks/:id/deliveries?status=&limit=");
+    console.log("[server]   GET  /analytics/tvl?token=<address>&from=&to=&cumulative=true");
+    console.log("[server]   GET  /analytics/schedules/:id/history?from=&to=");
+    console.log("[server]   GET  /analytics/grantors/:address/summary");
   });
 }
