@@ -1,5 +1,6 @@
 "use client";
 import { useRef, useState } from "react";
+import Link from "next/link";
 import { useToast } from "@/components/Toast";
 import {
   createSchedule,
@@ -186,7 +187,12 @@ export default function BulkImportForm() {
         <div>
           <h2 className="text-lg font-semibold">Bulk Import from CSV</h2>
           <p className="text-sm text-zinc-400 mt-1">
-            Upload a spreadsheet of beneficiaries to create many schedules at once.
+            Upload a spreadsheet of beneficiaries to create many schedules at once. Need per-row
+            tokens, start times, or up to 500 rows?{" "}
+            <Link href="/app/bulk-create" className="text-violet-400 hover:underline">
+              Try the large-batch bulk creator
+            </Link>
+            .
           </p>
         </div>
         <button
