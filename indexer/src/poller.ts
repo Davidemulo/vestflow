@@ -127,6 +127,10 @@ async function poll(): Promise<void> {
         let amount: string | null = null;
         let token: string | null = null;
         let createdAmount: string | null = null;
+        let startTime: number | null = null;
+        let duration: number | null = null;
+        let cliffDuration: number | null = null;
+        let vestingKind: string | null = null;
 
         switch (eventType) {
           case "schedule_created":
@@ -149,6 +153,17 @@ async function poll(): Promise<void> {
             createdAmount = valueArr[3] != null && scheduleId === Number(topics[1])
               ? String(valueArr[3])
               : valueArr[1] != null ? String(valueArr[1]) : null;
+            // Vesting curve params: only present in the current event shape
+            // (grantor, beneficiary, token, total_amount, start_time,
+            // duration, cliff_duration, vesting_kind, ...). Older replayed
+            // events lack these — the analytics worker falls back to
+            // claimed-only accounting when they're null.
+            if (scheduleId === Number(topics[1])) {
+              startTime = valueArr[4] != null ? Number(valueArr[4]) : null;
+              duration = valueArr[5] != null ? Number(valueArr[5]) : null;
+              cliffDuration = valueArr[6] != null ? Number(valueArr[6]) : null;
+              vestingKind = valueArr[7] != null ? String(valueArr[7]) : null;
+            }
             break;
           case "claimed":
             // topics: ["claimed", beneficiary, token]
@@ -210,6 +225,10 @@ async function poll(): Promise<void> {
           amount,
           token,
           created_amount: createdAmount,
+          start_time: startTime,
+          duration,
+          cliff_duration: cliffDuration,
+          vesting_kind: vestingKind,
           raw_topics: jsonStringify(topics),
           raw_value: jsonStringify(value),
         }, NETWORK);

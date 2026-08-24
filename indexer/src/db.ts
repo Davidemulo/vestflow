@@ -107,6 +107,10 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
     ensureColumn(db, "schedule_events", "token", "token TEXT");
     ensureColumn(db, "schedule_events", "created_amount", "created_amount TEXT");
     ensureColumn(db, "schedule_events", "proposal_id", "proposal_id INTEGER");
+    ensureColumn(db, "schedule_events", "start_time", "start_time INTEGER");
+    ensureColumn(db, "schedule_events", "duration", "duration INTEGER");
+    ensureColumn(db, "schedule_events", "cliff_duration", "cliff_duration INTEGER");
+    ensureColumn(db, "schedule_events", "vesting_kind", "vesting_kind TEXT");
     db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_proposal_id ON schedule_events (proposal_id)");
     migrateEventTypeCheck(db);
@@ -144,6 +148,10 @@ export interface InsertEventRow {
   amount: string | null;
   token: string | null;
   created_amount: string | null;
+  start_time?: number | null;
+  duration?: number | null;
+  cliff_duration?: number | null;
+  vesting_kind?: string | null;
   raw_topics: string;
   raw_value: string;
 }
@@ -158,8 +166,9 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
     .prepare(
       `INSERT OR IGNORE INTO schedule_events
         (id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
-         grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         grantor, beneficiary, amount, token, created_amount,
+         start_time, duration, cliff_duration, vesting_kind, raw_topics, raw_value)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       row.id,
@@ -173,6 +182,10 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
       row.amount,
       row.token,
       row.created_amount,
+      row.start_time ?? null,
+      row.duration ?? null,
+      row.cliff_duration ?? null,
+      row.vesting_kind ?? null,
       row.raw_topics,
       row.raw_value
     );

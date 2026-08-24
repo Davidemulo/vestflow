@@ -27,6 +27,15 @@ CREATE TABLE IF NOT EXISTS schedule_events (
   token       TEXT,       -- parsed Stellar asset contract address when available
   created_amount TEXT,    -- bigint as decimal string (schedule_created events only)
 
+  -- Vesting curve parameters, captured from schedule_created events only.
+  -- Used by the analytics materialization worker to compute vested amounts
+  -- without a contract call. NULL for every other event type, and for
+  -- schedule_created events whose value shape predates this capture.
+  start_time    INTEGER,  -- unix seconds
+  duration      INTEGER,  -- seconds
+  cliff_duration INTEGER, -- seconds (0 when the schedule has no cliff)
+  vesting_kind  TEXT,     -- 'Linear' | 'LinearWithCliff' | 'Cliff' | 'Graded' | other contract variant
+
   raw_topics TEXT NOT NULL, -- JSON array of native-decoded topic values
   raw_value  TEXT NOT NULL, -- JSON of native-decoded event value
 
