@@ -16,6 +16,7 @@
 
 import { rpc as StellarRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
 import { getCheckpoint, setCheckpoint, insertEvent, computeTvlStats, insertBeneficiarySchedule } from "./db";
+import { materialize } from "./analytics";
 import { getNetworkConfig, parseNetwork } from "./config";
 import { WebhookDeliveryWorker, fanOutEvent } from "./webhook-delivery";
 import type { EventType } from "./types";
@@ -286,6 +287,21 @@ async function poll(): Promise<void> {
       );
     } else {
       console.log(`[poller] No new events. Checkpoint: ledger ${highestLedger}.`);
+    }
+
+    // Fold newly ingested (and any previously unmaterialized, e.g. from a
+    // replay) events into the analytics snapshot tables. Cheap no-op when
+    // there's nothing pending.
+    try {
+      const result = materialize(NETWORK);
+      if (result.events_processed > 0) {
+        console.log(
+          `[poller] Analytics: materialized ${result.events_processed} event(s) → ` +
+            `${result.schedules_affected} schedule(s), ${result.tokens_affected} token(s), ${result.grantors_affected} grantor(s).`
+        );
+      }
+    } catch (err) {
+      console.error("[poller] Analytics materialization failed:", err);
     }
   } catch (err) {
     // Log but do not crash — the loop will retry on the next interval.
