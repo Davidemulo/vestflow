@@ -41,10 +41,11 @@ CREATE INDEX IF NOT EXISTS idx_event_type   ON schedule_events (event_type);
 CREATE INDEX IF NOT EXISTS idx_ledger       ON schedule_events (ledger);
 CREATE INDEX IF NOT EXISTS idx_token        ON schedule_events (token);
 
--- Additional unique constraint for idempotency: prevent duplicate events
--- within the same ledger and operation, even if Stellar assigns different IDs
--- This handles edge cases where the same event might be delivered with different IDs
-CREATE UNIQUE INDEX IF NOT EXISTS idx_event_dedup ON schedule_events (ledger, event_type, schedule_id, proposal_id, grantor, beneficiary, COALESCE(amount, ''), COALESCE(token, ''));
+-- NOTE: The event deduplication unique index (idx_event_dedup) is NOT defined
+-- here because it requires COALESCE expressions which must be created
+-- programmatically by db.ts on first open (see ensureEventDedupIndex).
+-- Defining it here would create a NULL-friendly version that conflicts with
+-- the COALESCE version created at runtime.
 
 -- Singleton checkpoint row — stores the highest fully-processed ledger.
 CREATE TABLE IF NOT EXISTS checkpoint (

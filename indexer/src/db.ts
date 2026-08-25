@@ -10,6 +10,28 @@ const SCHEMA_PATH = path.join(__dirname, "..", "schema.sql");
 
 const dbs = new Map<NetworkName, Database.Database>();
 
+/**
+ * Override the cached database connection for a given network.
+ * ONLY for use in tests — lets tests inject an in-memory database
+ * so all db functions (which call getDb internally) use the same
+ * test instance without any disk I/O.
+ */
+export function _setTestDb(network: NetworkName, db: Database.Database): void {
+  dbs.set(network, db);
+}
+
+/**
+ * Clear the cached database connection(s). Call after _setTestDb in
+ * afterEach so the next test starts fresh.
+ */
+export function _clearTestDb(network?: NetworkName): void {
+  if (network) {
+    dbs.delete(network);
+  } else {
+    dbs.clear();
+  }
+}
+
 function dbPathFor(network: NetworkName): string {
   const specific = process.env[`INDEXER_DB_PATH_${network.toUpperCase()}`];
   if (specific) return specific;

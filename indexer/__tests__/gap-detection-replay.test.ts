@@ -52,15 +52,17 @@ vi.mock("../src/config", () => ({
   }),
 }));
 
-vi.mock("@stellar/stellar-sdk", () => ({
-  rpc: {
-    Server: vi.fn().mockImplementation(() => ({
-      getEvents: vi.fn().mockResolvedValue({ events: [] }),
-    })),
-  },
-  xdr: { ScVal: {} },
-  scValToNative: vi.fn().mockReturnValue(null),
-}));
+vi.mock("@stellar/stellar-sdk", () => {
+  function MockServer(this: any) {
+    this.getEvents = vi.fn().mockResolvedValue({ events: [] });
+    this.getLatestLedger = vi.fn().mockResolvedValue({ sequence: 5000 });
+  }
+  return {
+    rpc: { Server: MockServer },
+    xdr: { ScVal: {} },
+    scValToNative: vi.fn().mockReturnValue(null),
+  };
+});
 
 vi.mock("../src/webhook-delivery", () => ({
   fanOutEvent: vi.fn(),
@@ -76,14 +78,15 @@ global.fetch = mockFetch;
 let testDb: TestDb;
 
 beforeEach(() => {
-  testDb = createTestDb();
-  // Route every getDb() call in the modules under test to our in-memory db
-  vi.spyOn(dbModule, "getDb").mockReturnValue(testDb.db as any);
   vi.clearAllMocks();
-  vi.spyOn(dbModule, "getDb").mockReturnValue(testDb.db as any);
+  testDb = createTestDb();
+  // Inject the in-memory db into the module-level cache so all functions
+  // that call getDb() internally use this instance, not a disk file.
+  dbModule._setTestDb("testnet", testDb.db as any);
 });
 
 afterEach(() => {
+  dbModule._clearTestDb("testnet");
   testDb.close();
   vi.restoreAllMocks();
 });
@@ -232,12 +235,12 @@ describe("Gap detector", () => {
       minGapSize: 1,
     });
 
-    // 14 999 ledgers / 5 000 = 3 full chunks + 1 partial = 4 chunks
-    expect(result.gaps.length).toBe(4);
+    // 14 999 ledgers / 5 000 = 2 full chunks + 1 partial = 3 chunks
+    expect(result.gaps.length).toBe(3);
     result.gaps.forEach((g) => {
       expect(g.to - g.from + 1).toBeLessThanOrEqual(5000);
     });
-    expect(dbModule.getPendingReplayCount("testnet")).toBe(4);
+    expect(dbModule.getPendingReplayCount("testnet")).toBe(3);
   });
 
   it("reports no gaps when checkpoint matches current ledger", async () => {

@@ -2,11 +2,18 @@
 /**
  * Performance tests — batch insert, duplicate detection, and concurrent safety.
  *
- * Uses the same in-memory database isolation as the integration tests.
+ * Uses _setTestDb / _clearTestDb to inject an in-memory SQLite instance into
+ * the module-level cache so every internal getDb() call in db.ts uses it.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createTestDb, makeScheduleCreatedEvent, makeClaimedEvent, countRows, type TestDb } from "./helpers/createTestDb";
+import {
+  createTestDb,
+  makeScheduleCreatedEvent,
+  makeClaimedEvent,
+  countRows,
+  type TestDb,
+} from "./helpers/createTestDb";
 import * as dbModule from "../src/db";
 import type { InsertEventRow } from "../src/db";
 
@@ -23,15 +30,19 @@ let testDb: TestDb;
 
 beforeEach(() => {
   testDb = createTestDb();
-  vi.spyOn(dbModule, "getDb").mockReturnValue(testDb.db as any);
+  dbModule._setTestDb("testnet", testDb.db as any);
 });
 
 afterEach(() => {
+  dbModule._clearTestDb("testnet");
   testDb.close();
-  vi.restoreAllMocks();
 });
 
-// ── Helpers ───────────────────────────────────────────────────────────
+// ── Event fixture helper ───────────────────────────────────────────────────
+//
+// Alternates schedule_created (even i) and claimed (odd i).
+// Every event gets a unique ledger and schedule_id so none collide on the
+// dedup index, and a unique id so none collide on the primary key.
 
 function makeEvents(count: number, startLedger = 1000): InsertEventRow[] {
   return Array.from({ length: count }, (_, i) =>
@@ -39,14 +50,14 @@ function makeEvents(count: number, startLedger = 1000): InsertEventRow[] {
       ? makeScheduleCreatedEvent({
           id: `${startLedger + i}-1-1`,
           ledger: startLedger + i,
-          schedule_id: i + 1,
+          schedule_id: startLedger + i,           // globally unique schedule_id
           grantor: "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN",
           beneficiary: "GBSOV3F63VBMLDKD3JV5HQC5KPVXJQEQHP5TPUMZWNMCZZQ6SKF2OL3A",
         })
       : makeClaimedEvent({
           id: `${startLedger + i}-1-1`,
           ledger: startLedger + i,
-          schedule_id: i + 1,
+          schedule_id: startLedger + i,           // globally unique schedule_id
         })
   );
 }
@@ -69,8 +80,7 @@ describe("Batch insert performance", () => {
     for (let i = 0; i < allEvents.length; i += 1000) {
       total += dbModule.insertEventsBatch(allEvents.slice(i, i + 1000), "testnet");
     }
-    const elapsed = Date.now() - t0;
-    expect(elapsed).toBeLessThan(20_000);
+    expect(Date.now() - t0).toBeLessThan(20_000);
     expect(total).toBe(10_000);
     expect(countRows(testDb.db)).toBe(10_000);
   });
@@ -82,7 +92,7 @@ describe("Duplicate detection at scale", () => {
     const events = makeEvents(500);
     expect(dbModule.insertEventsBatch(events, "testnet")).toBe(500);
 
-    // Replay: same content, IDs with different suffix
+    // Replay: same logical content, only the Stellar event ID differs
     const replay = events.map((e) => ({ ...e, id: e.id.replace("-1-1", "-R-1") }));
     expect(dbModule.insertEventsBatch(replay, "testnet")).toBe(0);
     expect(countRows(testDb.db)).toBe(500);
@@ -93,7 +103,7 @@ describe("Duplicate detection at scale", () => {
     const seed = makeEvents(10_000);
     dbModule.insertEventsBatch(seed, "testnet");
 
-    // Single duplicate check
+    // A replay of one existing event with a different ID
     const dup = { ...seed[4999], id: "dup-check-1" };
     const t0 = Date.now();
     const result = dbModule.insertEvent(dup, "testnet");
@@ -132,7 +142,6 @@ describe("Replay queue throughput", () => {
 // ─────────────────────────────────────────────────────────────────────
 describe("Indexed query performance", () => {
   beforeEach(() => {
-    // Seed 10k rows once per suite
     dbModule.insertEventsBatch(makeEvents(10_000), "testnet");
   });
 
@@ -140,7 +149,7 @@ describe("Indexed query performance", () => {
     const t0 = Date.now();
     const rows = testDb.db
       .prepare("SELECT * FROM schedule_events WHERE ledger BETWEEN ? AND ?")
-      .all(5000, 5100) as any[];
+      .all(1000, 1100) as any[];
     expect(Date.now() - t0).toBeLessThan(100);
     expect(rows.length).toBeGreaterThan(0);
   });
@@ -158,16 +167,19 @@ describe("Indexed query performance", () => {
 // ─────────────────────────────────────────────────────────────────────
 describe("Concurrent safety (simulated)", () => {
   it("10 concurrent insertEventsBatch calls totalling 1 000 rows all land correctly", async () => {
+    // Each batch gets its own ledger range so there are no duplicates
     const batches: InsertEventRow[][] = Array.from({ length: 10 }, (_, b) =>
-      makeEvents(100, b * 100 + 1)
+      makeEvents(100, b * 1000 + 1)       // batch b: ledgers b*1000+1 .. b*1000+100
     );
 
     const results = await Promise.all(
       batches.map(
         (batch) =>
           new Promise<number>((resolve) =>
-            // Stagger slightly to exercise interleaving
-            setTimeout(() => resolve(dbModule.insertEventsBatch(batch, "testnet")), Math.random() * 50)
+            setTimeout(
+              () => resolve(dbModule.insertEventsBatch(batch, "testnet")),
+              Math.random() * 50
+            )
           )
       )
     );

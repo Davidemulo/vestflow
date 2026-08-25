@@ -46,23 +46,21 @@ export function createTestDb(): TestDb {
   const schema = fs.readFileSync(SCHEMA_PATH, "utf8");
   db.exec(schema);
 
-  // Add the deduplication index (normally added by getDb() on first open)
-  try {
-    db.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_event_dedup ON schedule_events (
-        ledger,
-        event_type,
-        COALESCE(schedule_id, -1),
-        COALESCE(proposal_id, -1),
-        COALESCE(grantor, ''),
-        COALESCE(beneficiary, ''),
-        COALESCE(amount, ''),
-        COALESCE(token, '')
-      )
-    `);
-  } catch {
-    // index already created by the schema DDL – fine
-  }
+  // Add the deduplication index (normally added by db.ts ensureEventDedupIndex on first open).
+  // Must use COALESCE so that NULL values in nullable columns are treated as equivalent
+  // (prevents the same logical event being inserted twice with different Stellar IDs).
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_event_dedup ON schedule_events (
+      ledger,
+      event_type,
+      COALESCE(schedule_id, -1),
+      COALESCE(proposal_id, -1),
+      COALESCE(grantor, ''),
+      COALESCE(beneficiary, ''),
+      COALESCE(amount, ''),
+      COALESCE(token, '')
+    )
+  `);
 
   return {
     db,
