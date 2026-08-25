@@ -6,13 +6,13 @@ import Navbar from "@/components/Navbar";
 import { useToast } from "@/components/Toast";
 import VestingChart from "@/components/VestingChart";
 import ClaimModal from "@/components/ClaimModal";
+import TransferBeneficiaryModal from "@/components/TransferBeneficiaryModal";
 import AddressLabel from "@/components/AddressLabel";
 import BeneficiaryQrModal from "@/components/BeneficiaryQrModal";
 import {
   getSchedule,
   getClaimableAtTimestamp,
   transferGrantor,
-  transferBeneficiary,
   ScheduleData,
   stroopsToXlm,
   vestingProgress,
@@ -57,9 +57,6 @@ export default function ScheduleDetailPage() {
 
   // Transfer beneficiary state (#71)
   const [showTransferBeneficiary, setShowTransferBeneficiary] = useState(false);
-  const [newBeneficiaryInput, setNewBeneficiaryInput] = useState("");
-  const [transferBeneficiaryLoading, setTransferBeneficiaryLoading] = useState(false);
-  const [transferBeneficiaryErr, setTransferBeneficiaryErr] = useState("");
 
   const load = async () => {
     setLoading(true);
@@ -149,26 +146,6 @@ export default function ScheduleDetailPage() {
     }
   };
 
-  const handleTransferBeneficiary = async () => {
-    if (!publicKey || !schedule || !newBeneficiaryInput.trim()) return;
-    setTransferBeneficiaryLoading(true);
-    setTransferBeneficiaryErr("");
-    const toastId = addToast({ status: "pending", title: "Transfer pending…", message: "Waiting for transaction to confirm." });
-    try {
-      const hash = await transferBeneficiary(publicKey, schedule.id, newBeneficiaryInput.trim());
-      setLastTxHash(hash);
-      updateToast(toastId, { status: "success", title: "Beneficiary transferred", message: "Vesting rights moved to the new address.", txHash: hash, network: NETWORK });
-      setShowTransferBeneficiary(false);
-      setNewBeneficiaryInput("");
-      await load();
-    } catch (e: any) {
-      const msg = parseContractError(e);
-      setTransferBeneficiaryErr(msg);
-      updateToast(toastId, { status: "error", title: "Transfer failed", message: msg });
-    } finally {
-      setTransferBeneficiaryLoading(false);
-    }
-  };
 
   if (loading) return (
     <>
@@ -439,7 +416,7 @@ export default function ScheduleDetailPage() {
               )}
               {isBeneficiary && (
                 <button
-                  onClick={() => { setShowTransferBeneficiary((v) => !v); setTransferBeneficiaryErr(""); }}
+                  onClick={() => setShowTransferBeneficiary(true)}
                   className="rounded-xl px-5 py-2.5 border border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors text-sm"
                 >
                   Transfer Ownership
@@ -481,38 +458,7 @@ export default function ScheduleDetailPage() {
             </div>
           )}
 
-          {/* Transfer beneficiary form (#71) */}
-          {showTransferBeneficiary && isBeneficiary && (
-            <div className="flex flex-col gap-3 bg-zinc-900/50 rounded-xl p-4 border border-zinc-800">
-              <p className="text-sm text-zinc-300 font-medium">Transfer Ownership</p>
-              <p className="text-xs text-zinc-500">Move your vesting rights to a new address. The new address will receive all future tokens. This cannot be undone.</p>
-              <input
-                type="text"
-                placeholder="New beneficiary address (G…)"
-                value={newBeneficiaryInput}
-                onChange={(e) => setNewBeneficiaryInput(e.target.value)}
-                className="input text-sm"
-              />
-              {transferBeneficiaryErr && (
-                <p className="text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{transferBeneficiaryErr}</p>
-              )}
-              <div className="flex gap-2">
-                <button
-                  onClick={handleTransferBeneficiary}
-                  disabled={transferBeneficiaryLoading || !newBeneficiaryInput.trim()}
-                  className="btn-primary rounded-xl px-4 py-2 text-sm font-semibold disabled:opacity-60"
-                >
-                  {transferBeneficiaryLoading ? "Processing…" : "Confirm Transfer"}
-                </button>
-                <button
-                  onClick={() => { setShowTransferBeneficiary(false); setNewBeneficiaryInput(""); setTransferBeneficiaryErr(""); }}
-                  className="text-sm text-zinc-500 hover:text-zinc-300 transition-colors px-4 py-2"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
+
         </div>
       </main>
 
@@ -523,6 +469,13 @@ export default function ScheduleDetailPage() {
         open={showClaimModal}
         onClose={() => setShowClaimModal(false)}
         onSuccess={() => { setShowClaimModal(false); load(); }}
+      />
+
+      <TransferBeneficiaryModal
+        schedule={schedule}
+        open={showTransferBeneficiary}
+        onClose={() => setShowTransferBeneficiary(false)}
+        onSuccess={() => { setShowTransferBeneficiary(false); load(); }}
       />
 
       <BeneficiaryQrModal
