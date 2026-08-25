@@ -94,6 +94,81 @@ function migrateEventTypeCheck(db: Database.Database): void {
   }
 }
 
+/** Ensure the event deduplication index exists for idempotency */
+function ensureEventDedupIndex(db: Database.Database): void {
+  try {
+    // Check if the deduplication index already exists
+    const existingIndex = db
+      .prepare(
+        `SELECT name FROM sqlite_master 
+         WHERE type = 'index' AND name = 'idx_event_dedup'`
+      )
+      .get() as { name: string } | undefined;
+    
+    if (existingIndex) {
+      return; // Index already exists
+    }
+    
+    console.log('[db] Creating event deduplication index for enhanced idempotency...');
+    
+    // Create the deduplication index
+    db.exec(`
+      CREATE UNIQUE INDEX idx_event_dedup ON schedule_events (
+        ledger, 
+        event_type, 
+        COALESCE(schedule_id, -1), 
+        COALESCE(proposal_id, -1), 
+        COALESCE(grantor, ''), 
+        COALESCE(beneficiary, ''), 
+        COALESCE(amount, ''), 
+        COALESCE(token, '')
+      )
+    `);
+    
+    console.log('[db] Event deduplication index created successfully');
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+      console.warn('[db] Duplicate events detected during index creation - removing duplicates...');
+      
+      // If there are duplicates, we need to clean them up first
+      // Keep the first occurrence of each duplicate group
+      db.exec(`
+        DELETE FROM schedule_events 
+        WHERE rowid NOT IN (
+          SELECT MIN(rowid) 
+          FROM schedule_events 
+          GROUP BY ledger, event_type, 
+                   COALESCE(schedule_id, -1), 
+                   COALESCE(proposal_id, -1),
+                   COALESCE(grantor, ''), 
+                   COALESCE(beneficiary, ''), 
+                   COALESCE(amount, ''), 
+                   COALESCE(token, '')
+        )
+      `);
+      
+      // Try creating the index again
+      db.exec(`
+        CREATE UNIQUE INDEX idx_event_dedup ON schedule_events (
+          ledger, 
+          event_type, 
+          COALESCE(schedule_id, -1), 
+          COALESCE(proposal_id, -1), 
+          COALESCE(grantor, ''), 
+          COALESCE(beneficiary, ''), 
+          COALESCE(amount, ''), 
+          COALESCE(token, '')
+        )
+      `);
+      
+      console.log('[db] Duplicates removed and deduplication index created successfully');
+    } else {
+      console.error('[db] Failed to create event deduplication index:', error);
+      throw error;
+    }
+  }
+}
+
 export function getDb(network = parseNetwork(undefined)): Database.Database {
   let db = dbs.get(network);
   if (!db) {
@@ -110,6 +185,7 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
     db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_proposal_id ON schedule_events (proposal_id)");
     migrateEventTypeCheck(db);
+    ensureEventDedupIndex(db);
     dbs.set(network, db);
   }
   return db;
@@ -149,34 +225,203 @@ export interface InsertEventRow {
 }
 
 /**
- * Inserts an event row.
- * Returns true if a new row was written, false if it already existed
- * (idempotent — duplicate Stellar event IDs are silently ignored).
+ * Inserts an event row with enhanced idempotency.
+ * Returns true if a new row was written, false if it already existed.
+ * 
+ * Idempotency is enforced by:
+ * 1. Primary key constraint on Stellar event ID
+ * 2. Unique index on event signature (ledger + content) to catch duplicate events with different IDs
+ * 
+ * This ensures that the same event cannot be inserted twice, even if delivered
+ * from different sources (RPC vs Horizon) or with different Stellar IDs.
  */
 export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean {
-  const result = getDb(network)
-    .prepare(
+  const db = getDb(network);
+  
+  try {
+    // First try with INSERT OR IGNORE for the primary key constraint
+    const result = db
+      .prepare(
+        `INSERT OR IGNORE INTO schedule_events
+          (id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
+           grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        row.id,
+        row.event_type,
+        row.ledger,
+        row.ledger_closed_at,
+        row.schedule_id,
+        row.proposal_id ?? null,
+        row.grantor,
+        row.beneficiary,
+        row.amount,
+        row.token,
+        row.created_amount,
+        row.raw_topics,
+        row.raw_value
+      );
+    
+    return result.changes > 0;
+  } catch (error) {
+    // Handle unique constraint violations (from the dedup index)
+    if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+      // This is expected for duplicate events - they should be silently ignored
+      console.debug(`[db] Duplicate event detected and ignored: ${row.id} (ledger ${row.ledger})`);
+      return false;
+    }
+    
+    // Re-throw unexpected errors
+    console.error(`[db] Failed to insert event ${row.id}:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Batch insert events with enhanced error handling and transaction support.
+ * Returns the number of new events inserted (duplicates are silently skipped).
+ * 
+ * This is more efficient for replay operations that process many events at once.
+ */
+export function insertEventsBatch(events: InsertEventRow[], network?: NetworkName): number {
+  if (events.length === 0) return 0;
+  
+  const db = getDb(network);
+  let insertedCount = 0;
+  
+  // Use a transaction for better performance and atomicity
+  const transaction = db.transaction((eventRows: InsertEventRow[]) => {
+    const stmt = db.prepare(
       `INSERT OR IGNORE INTO schedule_events
         (id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
          grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      row.id,
-      row.event_type,
-      row.ledger,
-      row.ledger_closed_at,
-      row.schedule_id,
-      row.proposal_id ?? null,
-      row.grantor,
-      row.beneficiary,
-      row.amount,
-      row.token,
-      row.created_amount,
-      row.raw_topics,
-      row.raw_value
     );
-  return result.changes > 0;
+    
+    for (const row of eventRows) {
+      try {
+        const result = stmt.run(
+          row.id,
+          row.event_type,
+          row.ledger,
+          row.ledger_closed_at,
+          row.schedule_id,
+          row.proposal_id ?? null,
+          row.grantor,
+          row.beneficiary,
+          row.amount,
+          row.token,
+          row.created_amount,
+          row.raw_topics,
+          row.raw_value
+        );
+        
+        if (result.changes > 0) {
+          insertedCount++;
+        }
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
+          // Duplicate event - continue with next event
+          console.debug(`[db] Duplicate event in batch ignored: ${row.id}`);
+          continue;
+        }
+        // Re-throw unexpected errors to abort the transaction
+        throw error;
+      }
+    }
+  });
+  
+  try {
+    transaction(events);
+    
+    if (insertedCount > 0) {
+      console.log(`[db] Batch inserted ${insertedCount} new events (${events.length - insertedCount} duplicates skipped)`);
+    }
+    
+    return insertedCount;
+  } catch (error) {
+    console.error(`[db] Batch insert failed for ${events.length} events:`, error);
+    throw error;
+  }
+}
+
+/**
+ * Check if an event already exists by its Stellar ID
+ */
+export function eventExists(eventId: string, network?: NetworkName): boolean {
+  const row = getDb(network)
+    .prepare("SELECT 1 FROM schedule_events WHERE id = ?")
+    .get(eventId) as { "1": number } | undefined;
+  return !!row;
+}
+
+/**
+ * Check for potential duplicate events by content signature
+ * This helps identify events that might be duplicates but have different IDs
+ */
+export function findSimilarEvents(
+  ledger: number,
+  eventType: string,
+  scheduleId: number | null,
+  network?: NetworkName
+): { id: string; ledger: number }[] {
+  return getDb(network)
+    .prepare(
+      `SELECT id, ledger FROM schedule_events 
+       WHERE ledger = ? AND event_type = ? AND schedule_id = ?
+       ORDER BY id`
+    )
+    .all(ledger, eventType, scheduleId) as { id: string; ledger: number }[];
+}
+
+/**
+ * Validate event data before insertion to catch potential issues early
+ */
+export function validateEventData(row: InsertEventRow): { isValid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  
+  if (!row.id || typeof row.id !== 'string') {
+    errors.push('Event ID is required and must be a string');
+  }
+  
+  if (!row.event_type || typeof row.event_type !== 'string') {
+    errors.push('Event type is required and must be a string');
+  }
+  
+  if (typeof row.ledger !== 'number' || row.ledger <= 0) {
+    errors.push('Ledger must be a positive number');
+  }
+  
+  if (!row.ledger_closed_at || typeof row.ledger_closed_at !== 'string') {
+    errors.push('Ledger close time is required and must be a string');
+  }
+  
+  if (!row.raw_topics || typeof row.raw_topics !== 'string') {
+    errors.push('Raw topics is required and must be a JSON string');
+  }
+  
+  if (!row.raw_value || typeof row.raw_value !== 'string') {
+    errors.push('Raw value is required and must be a JSON string');
+  }
+  
+  // Validate JSON format
+  try {
+    JSON.parse(row.raw_topics);
+  } catch {
+    errors.push('Raw topics must be valid JSON');
+  }
+  
+  try {
+    JSON.parse(row.raw_value);
+  } catch {
+    errors.push('Raw value must be valid JSON');
+  }
+  
+  return {
+    isValid: errors.length === 0,
+    errors
+  };
 }
 
 // ── History ───────────────────────────────────────────────────────────
@@ -707,4 +952,174 @@ export function getScheduleIdsByBeneficiary(beneficiary: string, network?: Netwo
     .prepare("SELECT schedule_id FROM beneficiary_schedules WHERE beneficiary = ? ORDER BY created_at DESC")
     .all(beneficiary) as { schedule_id: number }[];
   return rows.map(r => r.schedule_id);
+}
+
+// ── Replay Queue Management ───────────────────────────────────────────────
+
+export interface ReplayQueueItem {
+  id: number;
+  from_ledger: number;
+  to_ledger: number;
+  status: 'pending' | 'in_progress' | 'completed' | 'failed';
+  completed_ledger?: number;
+  started_at?: number;
+  completed_at?: number;
+  error_message?: string;
+  retry_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * Enqueue a ledger range for replay processing
+ */
+export function enqueueReplayRange(fromLedger: number, toLedger: number, network?: NetworkName): number {
+  const result = getDb(network)
+    .prepare(
+      `INSERT INTO replay_queue (from_ledger, to_ledger, status)
+       VALUES (?, ?, 'pending')`
+    )
+    .run(fromLedger, toLedger);
+  return result.lastInsertRowid as number;
+}
+
+/**
+ * Get the next pending replay queue item
+ */
+export function getNextPendingReplay(network?: NetworkName): ReplayQueueItem | null {
+  const row = getDb(network)
+    .prepare(
+      `SELECT * FROM replay_queue 
+       WHERE status = 'pending' 
+       ORDER BY created_at ASC 
+       LIMIT 1`
+    )
+    .get() as ReplayQueueItem | undefined;
+  return row || null;
+}
+
+/**
+ * Mark a replay range as in progress
+ */
+export function markReplayInProgress(id: number, network?: NetworkName): void {
+  getDb(network)
+    .prepare(
+      `UPDATE replay_queue 
+       SET status = 'in_progress', started_at = ?, updated_at = ?
+       WHERE id = ?`
+    )
+    .run(Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000), id);
+}
+
+/**
+ * Update replay progress with the last successfully processed ledger
+ */
+export function updateReplayProgress(id: number, completedLedger: number, network?: NetworkName): void {
+  getDb(network)
+    .prepare(
+      `UPDATE replay_queue 
+       SET completed_ledger = ?, updated_at = ?
+       WHERE id = ?`
+    )
+    .run(completedLedger, Math.floor(Date.now() / 1000), id);
+}
+
+/**
+ * Mark a replay range as completed
+ */
+export function markReplayCompleted(id: number, network?: NetworkName): void {
+  getDb(network)
+    .prepare(
+      `UPDATE replay_queue 
+       SET status = 'completed', completed_at = ?, updated_at = ?
+       WHERE id = ?`
+    )
+    .run(Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000), id);
+}
+
+/**
+ * Mark a replay range as failed
+ */
+export function markReplayFailed(id: number, errorMessage: string, network?: NetworkName): void {
+  getDb(network)
+    .prepare(
+      `UPDATE replay_queue 
+       SET status = 'failed', error_message = ?, completed_at = ?, retry_count = retry_count + 1, updated_at = ?
+       WHERE id = ?`
+    )
+    .run(errorMessage, Math.floor(Date.now() / 1000), Math.floor(Date.now() / 1000), id);
+}
+
+/**
+ * Get all replay queue items (for monitoring/debugging)
+ */
+export function getReplayQueueItems(network?: NetworkName): ReplayQueueItem[] {
+  return getDb(network)
+    .prepare("SELECT * FROM replay_queue ORDER BY created_at DESC")
+    .all() as ReplayQueueItem[];
+}
+
+/**
+ * Get count of pending replay ranges
+ */
+export function getPendingReplayCount(network?: NetworkName): number {
+  const row = getDb(network)
+    .prepare("SELECT COUNT(*) as count FROM replay_queue WHERE status = 'pending'")
+    .get() as { count: number } | undefined;
+  return row?.count || 0;
+}
+
+/**
+ * Clean up completed and old failed replay entries (housekeeping)
+ */
+export function cleanupReplayQueue(daysToKeep: number = 7, network?: NetworkName): void {
+  const cutoff = Math.floor(Date.now() / 1000) - (daysToKeep * 24 * 60 * 60);
+  getDb(network)
+    .prepare(
+      `DELETE FROM replay_queue 
+       WHERE (status = 'completed' OR status = 'failed') 
+       AND completed_at < ?`
+    )
+    .run(cutoff);
+}
+
+// ── Gap Detection Log ─────────────────────────────────────────────────────
+
+export interface GapDetectionLogEntry {
+  id: number;
+  last_checkpoint: number;
+  current_ledger: number;
+  gaps_detected: number;
+  checked_at: number;
+}
+
+/**
+ * Log a gap detection run
+ */
+export function logGapDetection(
+  lastCheckpoint: number, 
+  currentLedger: number, 
+  gapsDetected: number, 
+  network?: NetworkName
+): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO gap_detection_log (last_checkpoint, current_ledger, gaps_detected)
+       VALUES (?, ?, ?)`
+    )
+    .run(lastCheckpoint, currentLedger, gapsDetected);
+}
+
+/**
+ * Get the most recent gap detection log entry
+ */
+export function getLastGapDetection(network?: NetworkName): GapDetectionLogEntry | null {
+  const row = getDb(network)
+    .prepare(
+      `SELECT * FROM gap_detection_log 
+       ORDER BY checked_at DESC 
+       LIMIT 1`
+    )
+    .get() as GapDetectionLogEntry | undefined;
+  return row || null;
 }

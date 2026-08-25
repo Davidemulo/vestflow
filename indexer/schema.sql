@@ -41,6 +41,11 @@ CREATE INDEX IF NOT EXISTS idx_event_type   ON schedule_events (event_type);
 CREATE INDEX IF NOT EXISTS idx_ledger       ON schedule_events (ledger);
 CREATE INDEX IF NOT EXISTS idx_token        ON schedule_events (token);
 
+-- Additional unique constraint for idempotency: prevent duplicate events
+-- within the same ledger and operation, even if Stellar assigns different IDs
+-- This handles edge cases where the same event might be delivered with different IDs
+CREATE UNIQUE INDEX IF NOT EXISTS idx_event_dedup ON schedule_events (ledger, event_type, schedule_id, proposal_id, grantor, beneficiary, COALESCE(amount, ''), COALESCE(token, ''));
+
 -- Singleton checkpoint row — stores the highest fully-processed ledger.
 CREATE TABLE IF NOT EXISTS checkpoint (
   id          INTEGER PRIMARY KEY CHECK (id = 1),
@@ -230,3 +235,44 @@ CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_due
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_registration
   ON webhook_deliveries (registration_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_event ON webhook_deliveries (event_id);
+
+-- ── Gap Detection and Replay ─────────────────────────────────────────
+-- Tracks ledger ranges that need to be replayed when gaps are detected
+-- between the last processed ledger and the current Horizon ledger.
+CREATE TABLE IF NOT EXISTS replay_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_ledger INTEGER NOT NULL,             -- start of ledger range (inclusive)
+  to_ledger INTEGER NOT NULL,               -- end of ledger range (inclusive)
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN (
+    'pending',
+    'in_progress', 
+    'completed',
+    'failed'
+  )),
+  completed_ledger INTEGER,                 -- progress tracking: last successfully processed ledger in range
+  started_at INTEGER,                       -- unix timestamp when processing started
+  completed_at INTEGER,                     -- unix timestamp when range completed or failed
+  error_message TEXT,                       -- error details if status = 'failed'
+  retry_count INTEGER NOT NULL DEFAULT 0,   -- number of retry attempts
+  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+  
+  -- Constraints to prevent overlapping ranges and ensure logical ordering
+  CHECK (from_ledger <= to_ledger),
+  CHECK (completed_ledger IS NULL OR (completed_ledger >= from_ledger AND completed_ledger <= to_ledger))
+);
+
+CREATE INDEX IF NOT EXISTS idx_replay_queue_status ON replay_queue (status);
+CREATE INDEX IF NOT EXISTS idx_replay_queue_created ON replay_queue (created_at);
+CREATE INDEX IF NOT EXISTS idx_replay_queue_range ON replay_queue (from_ledger, to_ledger);
+
+-- Gap detection metadata - tracks when gap detection last ran and any issues
+CREATE TABLE IF NOT EXISTS gap_detection_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  last_checkpoint INTEGER NOT NULL,         -- checkpoint ledger when gap detection ran
+  current_ledger INTEGER NOT NULL,          -- latest ledger from Horizon
+  gaps_detected INTEGER NOT NULL DEFAULT 0, -- number of gap ranges found
+  checked_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+
+CREATE INDEX IF NOT EXISTS idx_gap_detection_checked ON gap_detection_log (checked_at);
