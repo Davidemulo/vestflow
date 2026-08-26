@@ -126,6 +126,77 @@ export function parseContractError(e: Error): string {
 }
 
 // ---------------------------------------------------------------------------
+// formatRate (#683)
+// ---------------------------------------------------------------------------
+
+const RATE_UNITS: Array<{ label: string; seconds: bigint }> = [
+  { label: "sec", seconds: 1n },
+  { label: "min", seconds: 60n },
+  { label: "hour", seconds: 3_600n },
+  { label: "day", seconds: 86_400n },
+];
+
+/**
+ * Render a bigint `value` (in base units scaled by `decimals`) as a decimal
+ * string truncated to at most `maxFractionDigits` fractional digits.
+ *
+ * Uses only integer division/remainder — no floating-point.
+ */
+function formatUnits(value: bigint, decimals: number, maxFractionDigits: number): string {
+  const scale = 10n ** BigInt(decimals);
+  const whole = value / scale;
+  const fraction = value % scale;
+
+  const digits = Math.min(decimals, maxFractionDigits);
+  if (digits === 0) return whole.toString();
+
+  const dropExponent = decimals - digits;
+  const truncated = dropExponent > 0 ? fraction / 10n ** BigInt(dropExponent) : fraction;
+  const fractionStr = truncated
+    .toString()
+    .padStart(digits, "0")
+    .replace(/0+$/, "");
+
+  return fractionStr.length > 0 ? `${whole}.${fractionStr}` : whole.toString();
+}
+
+/**
+ * Format a per-second flow rate as a human-readable string, e.g. "0.001 XLM / day".
+ *
+ * Picks the smallest unit (sec → min → hour → day) whose value doesn't
+ * truncate to zero at the display precision — since a longer period always
+ * yields an equal-or-larger displayed amount, this escalates to a coarser
+ * unit only as far as needed to show a meaningful, non-zero number.
+ *
+ * Uses BigInt arithmetic throughout — no floating-point.
+ *
+ * @param amtPerSec - Flow rate in base units per second (e.g. stroops/sec).
+ * @param token - Token label to display (e.g. "XLM").
+ * @param decimals - Number of base-unit decimals for the token (e.g. 7 for XLM stroops).
+ */
+export function formatRate(amtPerSec: bigint, token: string, decimals: number): string {
+  if (amtPerSec < 0n) throw new Error("amtPerSec must not be negative");
+  if (!Number.isInteger(decimals) || decimals < 0) {
+    throw new Error("decimals must be a non-negative integer");
+  }
+
+  const maxFractionDigits = Math.min(decimals, 6);
+  const last = RATE_UNITS.length - 1;
+
+  for (let i = 0; i < RATE_UNITS.length; i++) {
+    const unit = RATE_UNITS[i];
+    const perUnit = amtPerSec * unit.seconds;
+    const formatted = formatUnits(perUnit, decimals, maxFractionDigits);
+    if (formatted !== "0" || i === last) {
+      return `${formatted} ${token} / ${unit.label}`;
+    }
+  }
+
+  // Unreachable — the loop always returns at the last ("day") unit.
+  throw new Error("unreachable");
+}
+
+// ---------------------------------------------------------------------------
 // formatSchedule (#447)
 // ---------------------------------------------------------------------------
 

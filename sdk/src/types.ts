@@ -74,6 +74,19 @@ export interface ScheduleData {
 }
 
 /**
+ * Result returned by {@link VestflowClient.collect}.
+ *
+ * When there are no claimable tokens the transaction is not submitted:
+ * `collected` is `0n` and `txHash` is an empty string.
+ */
+export interface CollectResult {
+  /** Tokens transferred to the beneficiary, in stroops. */
+  collected: bigint;
+  /** Transaction hash, or an empty string when nothing was collected. */
+  txHash: string;
+}
+
+/**
  * Configuration for the VestflowClient.
  */
 export interface VestflowConfig {
@@ -122,6 +135,49 @@ export interface Stream {
   ratePerSec: bigint;
   /** Unix timestamp (seconds) at which the stream stops. */
   maxEndTime: number;
+}
+
+/**
+ * Outcome of a submitted and settled write transaction.
+ */
+export interface TransactionResult {
+  /** Transaction hash. */
+  hash: string;
+  /** Settlement status as reported by the Soroban RPC. */
+  status: "SUCCESS" | "FAILED";
+}
+
+/**
+ * Live streaming balance for an account/token pair, read directly via
+ * Soroban simulation rather than from indexed state.
+ */
+export interface BalanceResult {
+  /** Total tokens streamed to the account so far but not yet collected. */
+  streamingBalance: bigint;
+  /** Portion of the streaming balance currently collectable. */
+  collectableAmount: bigint;
+  /** Current inbound streaming rate, in base units per second. */
+  streamingRatePerSec: bigint;
+}
+
+/**
+ * A single receiver in a splits configuration.
+ */
+export interface SplitsReceiver {
+  /** Stellar address of the receiver. */
+  address: string;
+  /** Share of incoming funds this receiver gets, in basis points (out of 10 000). */
+  weightBps: number;
+}
+
+/**
+ * An account's current splits configuration, as returned by the indexer.
+ */
+export interface SplitsConfig {
+  /** Configured receivers. Empty when no splits are configured. */
+  receivers: SplitsReceiver[];
+  /** Hash identifying this splits configuration, or "" when unconfigured. */
+  hash: string;
 }
 
 /**
