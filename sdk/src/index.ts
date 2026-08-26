@@ -22,6 +22,7 @@ export type {
   ScheduleData,
   RevokedSchedule,
   VestflowConfig,
+  Stream,
   CreateScheduleParams,
   CreateGradedScheduleParams,
   ProposeScheduleParams,
@@ -36,3 +37,9 @@ export type {
   SplitsReceiver,
   SplitsConfig,
 } from "./types";
+export { waitForTransaction, TimeoutError } from "./waitForTransaction";
+export type {
+  WaitForTransactionOptions,
+  GetTransactionResponse,
+  GetTransactionFn,
+} from "./waitForTransaction";

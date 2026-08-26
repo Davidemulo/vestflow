@@ -27,12 +27,17 @@ import type {
   ProposalState,
   VestingKind,
   ClaimDelegation,
+  Stream,
   CollectResult,
   TransactionResult,
   BalanceResult,
   SplitsConfig,
 } from "./types";
 import { xlmToStroops } from "./utils";
+import {
+  waitForTransaction as waitForTransactionHelper,
+  TimeoutError,
+} from "./waitForTransaction";
 
 // ---------------------------------------------------------------------------
 // Defaults
@@ -43,15 +48,15 @@ const DEFAULTS = {
     contractId: "CCZ6AE75C27DMB3SOIHK7WZSBUG3NQPVLHSVEBQ2FSAEVGRJ5TXAZWCX",
     rpcUrl: "https://soroban-testnet.stellar.org",
     nativeToken: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+    indexerUrl: "https://indexer.vestflow.testnet.stellar.org",
     networkPassphrase: Networks.TESTNET,
-    indexerUrl: "http://localhost:3001",
   },
   mainnet: {
     contractId: "",
     rpcUrl: "https://mainnet.sorobanrpc.com",
     nativeToken: "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA",
+    indexerUrl: "https://indexer.vestflow.stellar.org",
     networkPassphrase: Networks.PUBLIC,
-    indexerUrl: "",
   },
 } as const;
 
@@ -92,8 +97,8 @@ export class VestflowClient {
   private readonly server: StellarRpc.Server;
   private readonly contractId: string;
   private readonly nativeToken: string;
-  private readonly networkPassphrase: string;
   private readonly indexerUrl: string;
+  private readonly networkPassphrase: string;
   private readonly signTransaction: ((xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>) | null;
 
   /**
@@ -107,6 +112,7 @@ export class VestflowClient {
 
     this.contractId = config.contractId ?? defaults.contractId;
     this.nativeToken = config.nativeToken ?? defaults.nativeToken;
+    this.indexerUrl = config.indexerUrl ?? defaults.indexerUrl;
     this.networkPassphrase = defaults.networkPassphrase;
     this.indexerUrl = config.indexerUrl ?? defaults.indexerUrl;
     this.server = new StellarRpc.Server(config.rpcUrl ?? defaults.rpcUrl);
@@ -193,10 +199,11 @@ export class VestflowClient {
   // ── Poll ──────────────────────────────────────────────────────────────────
 
   /**
-   * Poll Soroban RPC for a submitted transaction's outcome until it settles
-   * (anything other than `NOT_FOUND`), backing off exponentially between
-   * polls to avoid hammering the RPC endpoint while still resolving quickly
-   * for fast-confirming transactions.
+   * Poll Soroban RPC for a submitted transaction's outcome until it settles,
+   * backing off exponentially between polls (1s, 2s, 4s, 8s, ...).
+   *
+   * Delegates to the standalone {@link waitForTransaction} helper in
+   * `./waitForTransaction`, injecting this client's RPC `getTransaction`.
    *
    * @param hash - Transaction hash, e.g. as returned by `createSchedule`
    * @param timeoutMs - Maximum total time to wait before giving up (default 30000ms)
@@ -204,30 +211,57 @@ export class VestflowClient {
    * @param options.initialDelayMs - Delay before the first poll retry (default 1000ms)
    * @param options.maxDelayMs - Upper bound on the backoff delay (default 8000ms)
    * @returns The settled transaction response (e.g. status `SUCCESS` or `FAILED`)
-   * @throws If the transaction is still `NOT_FOUND` when `timeoutMs` elapses
+   * @throws {TimeoutError} If the transaction is still `NOT_FOUND` after `timeoutMs`
    */
   async waitForTransaction(
     hash: string,
     timeoutMs = 30_000,
     options: { initialDelayMs?: number; maxDelayMs?: number } = {}
   ): Promise<StellarRpc.Api.GetTransactionResponse> {
-    const initialDelayMs = options.initialDelayMs ?? 1000;
-    const maxDelayMs = options.maxDelayMs ?? 8000;
-    const deadline = Date.now() + timeoutMs;
+    return waitForTransactionHelper(hash, {
+      timeoutMs,
+      initialDelayMs: options.initialDelayMs,
+      maxDelayMs: options.maxDelayMs,
+      getTransaction: (h) => this.server.getTransaction(h),
+    });
+  }
 
-    let delay = initialDelayMs;
-    let status = await this.server.getTransaction(hash);
-    while (status.status === "NOT_FOUND") {
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `Timed out waiting for transaction ${hash} to confirm after ${timeoutMs}ms`
-        );
-      }
-      await new Promise((r) => setTimeout(r, delay));
-      delay = Math.min(delay * 2, maxDelayMs);
-      status = await this.server.getTransaction(hash);
+  // ── Indexer ────────────────────────────────────────────────────────────────
+
+  /**
+   * Query the VestFlow indexer for all active outgoing streams opened by a given
+   * account.
+   *
+   * Hits the indexer's `GET /streams?account=<account>` endpoint and returns
+   * typed {@link Stream} objects. Returns an empty array when the account has no
+   * streams or the indexer returns an empty list.
+   *
+   * @param account - Stellar address whose outgoing streams to fetch.
+   * @param indexerUrl - Optional indexer base URL override (defaults to the
+   *   client's configured `indexerUrl`).
+   * @returns Typed `Stream[]`, each with `receiver`, `token`, `ratePerSec`,
+   *   and `maxEndTime`.
+   */
+  async getStreams(account: string, indexerUrl = this.indexerUrl): Promise<Stream[]> {
+    const url = `${indexerUrl.replace(/\/$/, "")}/streams?account=${encodeURIComponent(account)}`;
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+    });
+    if (!res.ok) {
+      throw new Error(`Indexer request failed: ${res.status} ${res.statusText}`);
     }
-    return status;
+    const body = (await res.json()) as unknown;
+    const raw = Array.isArray(body)
+      ? body
+      : ((body as { streams?: unknown[] } | null)?.streams ?? []);
+
+    return (raw as Record<string, unknown>[]).map((item) => ({
+      sender: String(item.sender ?? account),
+      receiver: String(item.receiver ?? ""),
+      token: String(item.token ?? ""),
+      ratePerSec: BigInt(String(item.ratePerSec ?? item.rate_per_sec ?? 0)),
+      maxEndTime: Number(item.maxEndTime ?? item.max_end_time ?? 0),
+    }));
   }
 
   // ── Internal: parse schedule ──────────────────────────────────────────────

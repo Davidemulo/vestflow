@@ -111,12 +111,30 @@ export interface VestflowConfig {
    */
   nativeToken?: string;
   /**
-   * Override the indexer service base URL used by methods that read
-   * off-chain indexed data (e.g. {@link VestflowConfig}-consuming
-   * `getSplits`).
-   * Defaults to a local indexer instance.
+   * Override the VestFlow indexer base URL.
+   * Used by `getStreams` to query the `/streams` endpoint.
+   * Defaults to the public testnet indexer for the selected network.
    */
   indexerUrl?: string;
+}
+
+/**
+ * A single active outgoing stream returned by the indexer's `/streams` endpoint.
+ *
+ * Mirrors the Drips-style stream shape: tokens flow from `sender` to `receiver`
+ * at a constant `ratePerSec`, ceasing at `maxEndTime`.
+ */
+export interface Stream {
+  /** Stellar address of the account that opened the stream (the sender). */
+  sender: string;
+  /** Stellar address receiving the streamed tokens. */
+  receiver: string;
+  /** Stellar Asset Contract address of the streamed token. */
+  token: string;
+  /** Constant flow rate in stroops (base units) per second. */
+  ratePerSec: bigint;
+  /** Unix timestamp (seconds) at which the stream stops. */
+  maxEndTime: number;
 }
 
 /**

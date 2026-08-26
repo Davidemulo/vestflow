@@ -56,3 +56,9 @@ contracts/target/
 
 # Bundled Web Worker output (built by `npm run worker:build`)
 /public/workers/
+
+# SDK package artifacts
+/sdk/node_modules/
+/sdk/dist/
+/sdk/package-lock.json
+
