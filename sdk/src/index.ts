@@ -29,4 +29,5 @@ export type {
   GradedMilestone,
   VestingKind,
   ClaimDelegation,
+  CollectResult,
 } from "./types";

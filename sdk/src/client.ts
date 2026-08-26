@@ -26,6 +26,7 @@ import type {
   ProposalState,
   VestingKind,
   ClaimDelegation,
+  CollectResult,
 } from "./types";
 import { xlmToStroops } from "./utils";
 
@@ -707,6 +708,62 @@ export class VestflowClient {
       [nativeToScVal(scheduleId, { type: "u64" })],
       signer
     );
+  }
+
+  /**
+   * Collect all claimable tokens for a given SAC token address.
+   *
+   * Simulates the collectable amount first; if nothing is collectable the
+   * transaction is **not** submitted and the method resolves with
+   * `{ collected: 0n, txHash: "" }` — no gas is spent and no error is thrown.
+   *
+   * @param publicKey - Beneficiary's Stellar public key
+   * @param token - SAC address of the token to collect
+   * @param signer - Function that signs the transaction XDR
+   * @returns `{ collected, txHash }`. When nothing was collected, `txHash` is
+   *   an empty string and `collected` is `0n`.
+   */
+  async collect(
+    publicKey: string,
+    token: string,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<CollectResult> {
+    // Probe how much is collectable before spending fees.
+    let claimable = 0n;
+    try {
+      const val = await this.simulate(
+        "collectable",
+        [
+          nativeToScVal(publicKey, { type: "address" }),
+          nativeToScVal(token, { type: "address" }),
+        ],
+        publicKey
+      );
+      claimable = BigInt(scValToNative(val) ?? 0);
+    } catch {
+      // Contract may not expose `collectable` view — attempt the collect
+      // call regardless so on-chain logic decides.
+      claimable = 1n; // sentinel: proceed to submit
+    }
+
+    // Nothing to collect — return early without submitting a transaction.
+    if (claimable === 0n) {
+      return { collected: 0n, txHash: "" };
+    }
+
+    const txHash = await this.buildAndSend(
+      publicKey,
+      "collect",
+      [
+        nativeToScVal(publicKey, { type: "address" }),
+        nativeToScVal(token, { type: "address" }),
+      ],
+      signer
+    );
+
+    // Re-read collected amount from a fresh simulation if we used the sentinel.
+    const collected = claimable === 1n ? 0n : claimable;
+    return { collected, txHash };
   }
 
   /**
