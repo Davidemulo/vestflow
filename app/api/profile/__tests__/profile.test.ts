@@ -46,7 +46,7 @@ describe("GET /api/profile/:address (#672)", () => {
   });
 
   it("returns 400 for invalid Stellar address", async () => {
-    const { GET } = await import("../route");
+    const { GET } = await import("../[address]/route");
     const request = createMockRequest("invalid-address");
     const response = await GET(request, createMockParams("invalid-address"));
     const body = await response.json();
@@ -56,7 +56,7 @@ describe("GET /api/profile/:address (#672)", () => {
   });
 
   it("returns 400 for address starting with wrong letter", async () => {
-    const { GET } = await import("../route");
+    const { GET } = await import("../[address]/route");
     const invalidAddr = "A" + "B".repeat(55);
     const request = createMockRequest(invalidAddr);
     const response = await GET(request, createMockParams(invalidAddr));
@@ -70,7 +70,7 @@ describe("GET /api/profile/:address (#672)", () => {
     mockGetGrantorScheduleIds.mockResolvedValue([]);
     mockGetBeneficiaryScheduleIds.mockResolvedValue([]);
 
-    const { GET } = await import("../route");
+    const { GET } = await import("../[address]/route");
     const request = createMockRequest(VALID_ADDRESS);
     const response = await GET(request, createMockParams(VALID_ADDRESS));
     const body = await response.json();
@@ -122,7 +122,7 @@ describe("GET /api/profile/:address (#672)", () => {
     ]);
     mockGetClaimableBulk.mockResolvedValue([100n, 500n]);
 
-    const { GET } = await import("../route");
+    const { GET } = await import("../[address]/route");
     const request = createMockRequest(VALID_ADDRESS);
     const response = await GET(request, createMockParams(VALID_ADDRESS));
     const body = await response.json();
@@ -155,7 +155,7 @@ describe("GET /api/profile/:address (#672)", () => {
     ]);
     mockGetClaimableBulk.mockResolvedValue([500n]);
 
-    const { GET } = await import("../route");
+    const { GET } = await import("../[address]/route");
     const request = createMockRequest(VALID_ADDRESS);
     const response = await GET(request, createMockParams(VALID_ADDRESS));
     const body = await response.json();
@@ -202,7 +202,7 @@ describe("GET /api/profile/:address (#672)", () => {
     ]);
     mockGetClaimableBulk.mockResolvedValue([100n, 200n]);
 
-    const { GET } = await import("../route");
+    const { GET } = await import("../[address]/route");
     const request = createMockRequest(VALID_ADDRESS);
     const response = await GET(request, createMockParams(VALID_ADDRESS));
     const body = await response.json();
@@ -235,7 +235,7 @@ describe("GET /api/profile/:address (#672)", () => {
     ]);
     mockGetClaimableBulk.mockResolvedValue([50n]);
 
-    const { GET } = await import("../route");
+    const { GET } = await import("../[address]/route");
     const request = createMockRequest(VALID_ADDRESS);
     const response = await GET(request, createMockParams(VALID_ADDRESS));
     const body = await response.json();
@@ -250,7 +250,7 @@ describe("GET /api/profile/:address (#672)", () => {
     mockGetGrantorScheduleIds.mockResolvedValue([]);
     mockGetBeneficiaryScheduleIds.mockResolvedValue([]);
 
-    const { GET } = await import("../route");
+    const { GET } = await import("../[address]/route");
     const request = createMockRequest(VALID_ADDRESS);
     const response = await GET(request, createMockParams(VALID_ADDRESS));
     const body = await response.json();
@@ -269,7 +269,7 @@ describe("GET /api/profile/:address (#672)", () => {
     mockGetGrantorScheduleIds.mockResolvedValue([]);
     mockGetBeneficiaryScheduleIds.mockResolvedValue([]);
 
-    const { GET } = await import("../route");
+    const { GET } = await import("../[address]/route");
     const request = createMockRequest(VALID_ADDRESS);
     const response = await GET(request, createMockParams(VALID_ADDRESS));
 

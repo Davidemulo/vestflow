@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { withLogging, logRequest, RequestLogEntry } from "../requestLogger";
 
 function createMockRequest(pathname: string, method = "GET", headers?: Record<string, string>) {
@@ -21,6 +21,10 @@ describe("requestLogger", () => {
 
   beforeEach(() => {
     consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleSpy.mockRestore();
   });
 
   describe("withLogging", () => {
