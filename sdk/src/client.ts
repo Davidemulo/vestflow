@@ -15,6 +15,7 @@ import {
   xdr,
   nativeToScVal,
   scValToNative,
+  StrKey,
 } from "@stellar/stellar-sdk";
 import type {
   ScheduleData,
@@ -26,6 +27,9 @@ import type {
   ProposalState,
   VestingKind,
   ClaimDelegation,
+  TransactionResult,
+  BalanceResult,
+  SplitsConfig,
 } from "./types";
 import { xlmToStroops } from "./utils";
 
@@ -39,12 +43,14 @@ const DEFAULTS = {
     rpcUrl: "https://soroban-testnet.stellar.org",
     nativeToken: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
     networkPassphrase: Networks.TESTNET,
+    indexerUrl: "http://localhost:3001",
   },
   mainnet: {
     contractId: "",
     rpcUrl: "https://mainnet.sorobanrpc.com",
     nativeToken: "CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA",
     networkPassphrase: Networks.PUBLIC,
+    indexerUrl: "",
   },
 } as const;
 
@@ -86,6 +92,7 @@ export class VestflowClient {
   private readonly contractId: string;
   private readonly nativeToken: string;
   private readonly networkPassphrase: string;
+  private readonly indexerUrl: string;
   private readonly signTransaction: ((xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>) | null;
 
   /**
@@ -100,6 +107,7 @@ export class VestflowClient {
     this.contractId = config.contractId ?? defaults.contractId;
     this.nativeToken = config.nativeToken ?? defaults.nativeToken;
     this.networkPassphrase = defaults.networkPassphrase;
+    this.indexerUrl = config.indexerUrl ?? defaults.indexerUrl;
     this.server = new StellarRpc.Server(config.rpcUrl ?? defaults.rpcUrl);
     this.signTransaction = null;
   }
@@ -129,14 +137,14 @@ export class VestflowClient {
     return (result as any).result!.retval;
   }
 
-  // ── Internal: build and send ──────────────────────────────────────────────
+  // ── Internal: build, send, and wait for settlement ────────────────────────
 
-  private async buildAndSend(
+  private async submitAndSettle(
     publicKey: string,
     method: string,
     args: xdr.ScVal[],
     signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
-  ): Promise<string> {
+  ): Promise<TransactionResult> {
     const contract = new Contract(this.contractId);
     const account = await this.server.getAccount(publicKey);
     let tx = new TransactionBuilder(account, {
@@ -162,8 +170,23 @@ export class VestflowClient {
     );
     if (submitted.status === "ERROR") throw new Error("Transaction failed");
 
-    await this.waitForTransaction(submitted.hash);
-    return submitted.hash;
+    const settled = await this.waitForTransaction(submitted.hash);
+    return {
+      hash: submitted.hash,
+      status: settled.status === "SUCCESS" ? "SUCCESS" : "FAILED",
+    };
+  }
+
+  // ── Internal: build and send ──────────────────────────────────────────────
+
+  private async buildAndSend(
+    publicKey: string,
+    method: string,
+    args: xdr.ScVal[],
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<string> {
+    const { hash } = await this.submitAndSettle(publicKey, method, args, signer);
+    return hash;
   }
 
   // ── Poll ──────────────────────────────────────────────────────────────────
@@ -585,6 +608,75 @@ export class VestflowClient {
     } catch {
       return null;
     }
+  }
+
+  // ── Internal: parse balance ────────────────────────────────────────────────
+
+  private parseBalance(raw: any): BalanceResult {
+    return {
+      streamingBalance: BigInt(raw?.streaming_balance ?? 0),
+      collectableAmount: BigInt(raw?.collectable_amount ?? 0),
+      streamingRatePerSec: BigInt(raw?.streaming_rate_per_sec ?? 0),
+    };
+  }
+
+  /**
+   * Read the live streaming balance and collectable amount for an
+   * account/token pair via Soroban simulation — not indexed state — so the
+   * result reflects on-chain streams as of the current ledger.
+   *
+   * @param account - Stellar address to read the balance for.
+   * @param token - Stellar Asset Contract address of the token.
+   * @param publicKey - Optional source account for the simulation.
+   * @returns Streaming balance, collectable amount, and current streaming rate.
+   * Returns all-zero values when the account has no streams for this token.
+   */
+  async getBalance(account: string, token: string, publicKey?: string): Promise<BalanceResult> {
+    try {
+      const val = await this.simulate(
+        "streaming_balance",
+        [
+          nativeToScVal(account, { type: "address" }),
+          nativeToScVal(token, { type: "address" }),
+        ],
+        publicKey
+      );
+      return this.parseBalance(scValToNative(val));
+    } catch {
+      return { streamingBalance: 0n, collectableAmount: 0n, streamingRatePerSec: 0n };
+    }
+  }
+
+  /**
+   * Fetch the current splits configuration for an account from the
+   * indexer's `/splits` endpoint.
+   *
+   * @param account - Stellar address to look up.
+   * @returns Configured receivers and a hash identifying the splits
+   * configuration. Returns an empty receivers list and `hash: ""` when the
+   * account has no splits configured.
+   * @throws If the indexer request fails with an unexpected (non-404) error status.
+   */
+  async getSplits(account: string): Promise<SplitsConfig> {
+    const url = new URL("/splits", this.indexerUrl);
+    url.searchParams.set("account", account);
+
+    const res = await fetch(url.toString());
+    if (res.status === 404) {
+      return { receivers: [], hash: "" };
+    }
+    if (!res.ok) {
+      throw new Error(`Failed to fetch splits for ${account}: ${res.status}`);
+    }
+
+    const data = await res.json();
+    const receivers = Array.isArray(data.receivers)
+      ? data.receivers.map((r: any) => ({
+          address: String(r.address ?? r.account ?? ""),
+          weightBps: Number(r.weightBps ?? r.weight_bps ?? r.weight ?? 0),
+        }))
+      : [];
+    return { receivers, hash: String(data.hash ?? "") };
   }
 
   /**
@@ -1136,6 +1228,44 @@ export class VestflowClient {
       ],
       signer
     );
+  }
+
+  /**
+   * Send a one-time direct payment ("give") to a receiver, bypassing any
+   * vesting schedule.
+   *
+   * @param sender - Sender's Stellar public key (must sign the transaction).
+   * @param receiver - Recipient's Stellar address (account or contract).
+   * @param token - Stellar Asset Contract address of the token to send.
+   * @param amount - Amount to send, in the token's base units. Must be > 0n.
+   * @param signer - Function that signs the transaction XDR.
+   * @returns Transaction result with hash and settlement status.
+   * @throws If `receiver` or `token` is not a valid Stellar address, or `amount` is not positive.
+   */
+  async give(
+    sender: string,
+    receiver: string,
+    token: string,
+    amount: bigint,
+    signer: (xdr: string, opts: { networkPassphrase: string }) => Promise<string | { signedTxXdr: string }>
+  ): Promise<TransactionResult> {
+    if (!StrKey.isValidEd25519PublicKey(receiver) && !StrKey.isValidContract(receiver)) {
+      throw new Error("receiver must be a valid Stellar address");
+    }
+    if (!StrKey.isValidContract(token)) {
+      throw new Error("token must be a valid Stellar Asset Contract address");
+    }
+    if (amount <= 0n) {
+      throw new Error("amount must be greater than 0");
+    }
+
+    const args: xdr.ScVal[] = [
+      nativeToScVal(sender, { type: "address" }),
+      nativeToScVal(receiver, { type: "address" }),
+      nativeToScVal(token, { type: "address" }),
+      nativeToScVal(amount, { type: "i128" }),
+    ];
+    return this.submitAndSettle(sender, "give", args, signer);
   }
 
   subscribeToSchedule(
