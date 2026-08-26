@@ -165,3 +165,38 @@ CREATE TABLE IF NOT EXISTS beneficiary_schedules (
 CREATE INDEX IF NOT EXISTS idx_beneficiary_schedules_beneficiary ON beneficiary_schedules(beneficiary);
 
 COMMENT ON TABLE beneficiary_schedules IS 'Index mapping beneficiary addresses to their schedule IDs for O(1) lookup';
+
+CREATE TABLE IF NOT EXISTS current_streams (
+  account        VARCHAR(56) NOT NULL,
+  token          VARCHAR(56) NOT NULL,
+  receivers_json JSONB NOT NULL,
+  updated_at     TIMESTAMP WITH TIME ZONE NOT NULL,
+  PRIMARY KEY (account, token)
+);
+
+CREATE TABLE IF NOT EXISTS gives (
+  id             VARCHAR(100) PRIMARY KEY,
+  sender         VARCHAR(56) NOT NULL,
+  receiver       VARCHAR(56) NOT NULL,
+  token          VARCHAR(56) NOT NULL,
+  amount_stroops NUMERIC(38, 0) NOT NULL,
+  ledger         BIGINT NOT NULL,
+  timestamp      TIMESTAMP WITH TIME ZONE NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gives_sender_timestamp
+  ON gives (sender, timestamp DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_gives_receiver_timestamp
+  ON gives (receiver, timestamp DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS collected_totals (
+  account                  VARCHAR(56) NOT NULL,
+  token                    VARCHAR(56) NOT NULL,
+  total_collected_stroops  NUMERIC(38, 0) NOT NULL DEFAULT 0,
+  updated_at               TIMESTAMP WITH TIME ZONE NOT NULL,
+  PRIMARY KEY (account, token)
+);
+
+COMMENT ON TABLE current_streams IS 'Current stream receiver configuration projected from stream_set events';
+COMMENT ON TABLE gives IS 'Append-only give history projected from given events';
+COMMENT ON TABLE collected_totals IS 'Per-account collected totals projected from collected events';

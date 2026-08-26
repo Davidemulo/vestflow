@@ -65,6 +65,9 @@ function inferEventType(topics: unknown[]): EventType {
   if (tag === "prop_ack") return "proposal_acknowledged";
   if (tag === "prop_act") return "proposal_activated";
   if (tag === "prop_exp") return "proposal_expired";
+  if (tag === "stream_set") return "stream_set";
+  if (tag === "given") return "given";
+  if (tag === "collected") return "collected";
   return "unknown";
 }
 
@@ -220,6 +223,32 @@ async function poll(): Promise<void> {
             grantor = toStr(Array.isArray(value) || (value && typeof value === "object")
               ? valueArr[0]
               : value);
+            break;
+          case "stream_set":
+            // topics: ["stream_set", account, token]
+            // value: current receiver configuration. A zero-rate receiver
+            // set is still current state and overwrites older configs.
+            grantor = toStr(topics[1]);
+            token = toStr(topics[2]);
+            break;
+          case "given":
+            // topics: ["given", sender, receiver, token]
+            // value: amount_stroops, or [amount_stroops, ...metadata]
+            grantor = toStr(topics[1]);
+            beneficiary = toStr(topics[2]);
+            token = toStr(topics[3]);
+            amount = Array.isArray(value) || (value && typeof value === "object")
+              ? valueArr[0] != null ? String(valueArr[0]) : null
+              : value != null ? String(value) : null;
+            break;
+          case "collected":
+            // topics: ["collected", account, token]
+            // value: amount_stroops, or [amount_stroops, ...metadata]
+            beneficiary = toStr(topics[1]);
+            token = toStr(topics[2]);
+            amount = Array.isArray(value) || (value && typeof value === "object")
+              ? valueArr[0] != null ? String(valueArr[0]) : null
+              : value != null ? String(value) : null;
             break;
         }
 

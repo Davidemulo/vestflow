@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS schedule_events (
     'proposal_acknowledged',
     'proposal_activated',
     'proposal_expired',
+    'stream_set',
+    'given',
+    'collected',
     'unknown'
   )),
 
@@ -167,6 +170,37 @@ CREATE TABLE IF NOT EXISTS drips_streaming_balances (
 
 CREATE INDEX IF NOT EXISTS idx_drips_streaming_balances_token
   ON drips_streaming_balances (token);
+
+CREATE TABLE IF NOT EXISTS current_streams (
+  account        TEXT NOT NULL,
+  token          TEXT NOT NULL,
+  receivers_json TEXT NOT NULL,
+  updated_at     INTEGER NOT NULL,
+  PRIMARY KEY (account, token)
+);
+
+CREATE TABLE IF NOT EXISTS gives (
+  id             TEXT PRIMARY KEY,
+  sender         TEXT NOT NULL,
+  receiver       TEXT NOT NULL,
+  token          TEXT NOT NULL,
+  amount_stroops TEXT NOT NULL,
+  ledger         INTEGER NOT NULL,
+  timestamp      INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_gives_sender_timestamp
+  ON gives (sender, timestamp DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_gives_receiver_timestamp
+  ON gives (receiver, timestamp DESC, id DESC);
+
+CREATE TABLE IF NOT EXISTS collected_totals (
+  account                  TEXT NOT NULL,
+  token                    TEXT NOT NULL,
+  total_collected_stroops  TEXT NOT NULL DEFAULT '0',
+  updated_at               INTEGER NOT NULL,
+  PRIMARY KEY (account, token)
+);
 
 -- Notification subscriptions
 CREATE TABLE IF NOT EXISTS notification_subscriptions (
