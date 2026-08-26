@@ -21,6 +21,7 @@ export type {
   ScheduleData,
   RevokedSchedule,
   VestflowConfig,
+  Stream,
   CreateScheduleParams,
   CreateGradedScheduleParams,
   ProposeScheduleParams,
@@ -30,3 +31,9 @@ export type {
   VestingKind,
   ClaimDelegation,
 } from "./types";
+export { waitForTransaction, TimeoutError } from "./waitForTransaction";
+export type {
+  WaitForTransactionOptions,
+  GetTransactionResponse,
+  GetTransactionFn,
+} from "./waitForTransaction";

@@ -1,13 +1,14 @@
-# @vestflow/sdk
+# @drips/stellar-sdk
 
-TypeScript SDK for interacting with the VestFlow vesting contract on Stellar/Soroban.
+TypeScript SDK for interacting with the Drips/VestFlow streaming and vesting
+contracts on Stellar/Soroban.
 
 ## Installation
 
 ```bash
-npm install @vestflow/sdk
+npm install @drips/stellar-sdk
 # or
-pnpm add @vestflow/sdk
+pnpm add @drips/stellar-sdk
 ```
 
 For wallet signing support (browser), also install:
@@ -19,7 +20,7 @@ npm install @stellar/freighter-api
 ## Quick Start
 
 ```ts
-import { VestflowClient } from "@vestflow/sdk";
+import { VestflowClient } from "@drips/stellar-sdk";
 
 // Create a client (defaults to testnet)
 const client = new VestflowClient({ network: "testnet" });
@@ -83,6 +84,35 @@ const nodeSigner = async (xdr: string, opts: { networkPassphrase: string }) => {
 const hash = await client.createSchedule({ ... }, nodeSigner);
 ```
 
+### Get active outgoing streams
+
+```ts
+// Query the indexer for all active streams opened by an account.
+const streams = await client.getStreams("G...");
+for (const s of streams) {
+  console.log(s.receiver, s.token, s.ratePerSec.toString(), s.maxEndTime);
+}
+```
+
+### Waiting for a transaction
+
+```ts
+import { waitForTransaction, TimeoutError } from "@drips/stellar-sdk";
+
+// Poll the RPC with exponential backoff until the tx settles.
+try {
+  const result = await waitForTransaction(hash, {
+    getTransaction: (h) => server.getTransaction(h),
+    timeoutMs: 30_000,
+  });
+  console.log(result.status); // "SUCCESS"
+} catch (err) {
+  if (err instanceof TimeoutError) {
+    console.error("transaction never confirmed");
+  }
+}
+```
+
 ## API Reference
 
 ### `new VestflowClient(config?)`
@@ -93,6 +123,7 @@ const hash = await client.createSchedule({ ... }, nodeSigner);
 | `contractId` | `string` | Deployed testnet ID | Override contract address |
 | `rpcUrl` | `string` | Public endpoint | Override Soroban RPC URL |
 | `nativeToken` | `string` | Testnet XLM SAC | Override native token SAC |
+| `indexerUrl` | `string` | Public indexer | Override the indexer base URL used by `getStreams` |
 
 ### Read Methods
 
@@ -107,6 +138,7 @@ const hash = await client.createSchedule({ ... }, nodeSigner);
 | `getScheduleBatch(ids, publicKey?)` | `Promise<(ScheduleData \| null)[]>` | Fetch multiple schedules in one call |
 | `getRemainingUnvested(id, publicKey?)` | `Promise<bigint>` | Unvested remainder (what a revoke would recover) |
 | `getAllSchedules(publicKey?)` | `Promise<ScheduleData[]>` | All schedules |
+| `getStreams(account, indexerUrl?)` | `Promise<Stream[]>` | Active outgoing streams for an account |
 
 ### Write Methods
 
@@ -115,6 +147,13 @@ const hash = await client.createSchedule({ ... }, nodeSigner);
 | `createSchedule(params, signer)` | `Promise<string>` | Create a new vesting schedule |
 | `claimVested(publicKey, id, signer)` | `Promise<string>` | Claim vested tokens |
 | `revokeSchedule(publicKey, id, signer)` | `Promise<string>` | Revoke a schedule (grantor only) |
+
+### Transaction polling
+
+| Export | Description |
+|---|---|
+| `waitForTransaction(hash, opts)` | Poll the RPC with exponential backoff (1s, 2s, 4s, 8s…) until the transaction settles; throws `TimeoutError` after `timeoutMs` (default 30s) |
+| `TimeoutError` | Error thrown when the wait times out |
 
 ### Utilities
 
@@ -126,6 +165,11 @@ const hash = await client.createSchedule({ ... }, nodeSigner);
 | `vestingProgress(schedule, now)` | Vesting progress percentage (0-100) |
 | `formatDate(timestamp)` | Format Unix timestamp as date string |
 | `parseContractError(error)` | Map contract error to user-friendly message |
+
+## Building
+
+`npm run build` produces both ESM (`dist/esm/`) and CJS (`dist/cjs/`) bundles
+with matching type declarations, ready to publish to npm.
 
 ## License
 
