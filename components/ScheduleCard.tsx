@@ -14,6 +14,7 @@ import { useWallet } from "@/lib/WalletContext";
 import CopyButton from "@/components/CopyButton";
 import ClaimModal from "@/components/ClaimModal";
 import RevokeModal from "@/components/RevokeModal";
+import TransferBeneficiaryModal from "@/components/TransferBeneficiaryModal";
 import VestingChart from "@/components/VestingChart";
 import AddressLabel from "@/components/AddressLabel";
 import { useXlmPrice, formatUsd } from "@/lib/price";
@@ -30,6 +31,7 @@ export default function ScheduleCard({
   const [showChart, setShowChart] = useState(false);
   const [showClaimModal, setShowClaimModal] = useState(false);
   const [showRevokeModal, setShowRevokeModal] = useState(false);
+  const [showTransferModal, setShowTransferModal] = useState(false);
   const xlmPrice = useXlmPrice();
 
   const now = Math.floor(Date.now() / 1000);
@@ -287,6 +289,14 @@ export default function ScheduleCard({
               Revoke
             </button>
           )}
+          {isBeneficiary && !schedule.revoked && (
+            <button
+              onClick={() => setShowTransferModal(true)}
+              className="text-xs rounded-lg px-3 py-1.5 border border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200 transition-colors"
+            >
+              Transfer
+            </button>
+          )}
         </div>
       )}
 
@@ -305,6 +315,12 @@ export default function ScheduleCard({
         open={showRevokeModal}
         onClose={() => setShowRevokeModal(false)}
         onSuccess={() => { setShowRevokeModal(false); onAction(); }}
+      />
+      <TransferBeneficiaryModal
+        schedule={schedule}
+        open={showTransferModal}
+        onClose={() => setShowTransferModal(false)}
+        onSuccess={() => { setShowTransferModal(false); onAction(); }}
       />
     </div>
   );
