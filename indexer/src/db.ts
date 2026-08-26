@@ -678,6 +678,168 @@ export function getTvlStats(network = parseNetwork(undefined)): TvlStats {
   };
 }
 
+// ── Drips indexed state queries ───────────────────────────────────────
+
+export interface CursorPage<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+export interface DripsList {
+  id: string;
+  name: string;
+  owner: string;
+  member_count: number;
+  total_funding_rate_per_sec: string;
+  token: string;
+}
+
+export interface DripsListMember {
+  address: string;
+  joined_at: number;
+}
+
+export interface DripsStream {
+  receiver: string;
+  token: string;
+  rate_per_second: string;
+  estimated_end_time: number | null;
+}
+
+interface DripsCursor {
+  createdAt?: number;
+  joinedAt?: number;
+  id?: string;
+  address?: string;
+}
+
+function encodeDripsCursor(cursor: DripsCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+function decodeDripsCursor(cursor?: string): DripsCursor | null {
+  if (!cursor) return {};
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as DripsCursor;
+    if (!value || typeof value !== "object") return null;
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function boundedPageSize(limit?: number): number {
+  return Math.min(Math.max(limit ?? 50, 1), 200);
+}
+
+export function queryDripsLists(params: {
+  owner?: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<DripsList> | null {
+  const cursor = decodeDripsCursor(params.cursor);
+  if (cursor === null || (params.cursor && (typeof cursor.createdAt !== "number" || typeof cursor.id !== "string"))) {
+    return null;
+  }
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  if (params.owner) {
+    conditions.push("l.owner = ?");
+    values.push(params.owner);
+  }
+  if (params.cursor) {
+    conditions.push("(l.created_at < ? OR (l.created_at = ? AND l.id < ?))");
+    values.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const limit = boundedPageSize(params.limit);
+  const rows = getDb(params.network).prepare(
+    `SELECT l.id, l.name, l.owner, l.token, l.total_funding_rate_per_sec, l.created_at,
+       COUNT(m.address) AS member_count
+     FROM drips_lists l
+     LEFT JOIN drips_list_members m ON m.list_id = l.id AND m.left_at IS NULL
+     ${where}
+     GROUP BY l.id
+     ORDER BY l.created_at DESC, l.id DESC
+     LIMIT ?`
+  ).all(...values, limit + 1) as (DripsList & { created_at: number })[];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map(({ created_at: _createdAt, ...list }) => list),
+    nextCursor: hasMore && last ? encodeDripsCursor({ createdAt: last.created_at, id: last.id }) : null,
+  };
+}
+
+export function queryDripsListMembers(params: {
+  listId: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<DripsListMember> | "not_found" | null {
+  const db = getDb(params.network);
+  if (!db.prepare("SELECT 1 FROM drips_lists WHERE id = ?").get(params.listId)) return "not_found";
+  const cursor = decodeDripsCursor(params.cursor);
+  if (cursor === null || (params.cursor && (typeof cursor.joinedAt !== "number" || typeof cursor.address !== "string"))) return null;
+  const values: unknown[] = [params.listId];
+  let after = "";
+  if (params.cursor) {
+    after = "AND (joined_at > ? OR (joined_at = ? AND address > ?))";
+    values.push(cursor.joinedAt, cursor.joinedAt, cursor.address);
+  }
+  const limit = boundedPageSize(params.limit);
+  const rows = db.prepare(
+    `SELECT address, joined_at FROM drips_list_members
+     WHERE list_id = ? AND left_at IS NULL ${after}
+     ORDER BY joined_at ASC, address ASC LIMIT ?`
+  ).all(...values, limit + 1) as DripsListMember[];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return { items: page, nextCursor: hasMore && last ? encodeDripsCursor({ joinedAt: last.joined_at, address: last.address }) : null };
+}
+
+export function queryDripsStreams(params: {
+  account: string;
+  limit?: number;
+  cursor?: string;
+  network?: NetworkName;
+}): CursorPage<DripsStream> | null {
+  const cursor = decodeDripsCursor(params.cursor);
+  if (cursor === null || (params.cursor && (typeof cursor.createdAt !== "number" || typeof cursor.id !== "string"))) return null;
+  const now = Math.floor(Date.now() / 1000);
+  const values: unknown[] = [params.account, now];
+  let after = "";
+  if (params.cursor) {
+    after = "AND (created_at < ? OR (created_at = ? AND id < ?))";
+    values.push(cursor.createdAt, cursor.createdAt, cursor.id);
+  }
+  const limit = boundedPageSize(params.limit);
+  const rows = getDb(params.network).prepare(
+    `SELECT id, receiver, token, rate_per_second, estimated_end_time, created_at
+     FROM drips_streams
+     WHERE account = ? AND ended_at IS NULL
+       AND (estimated_end_time IS NULL OR estimated_end_time > ?) ${after}
+     ORDER BY created_at DESC, id DESC LIMIT ?`
+  ).all(...values, limit + 1) as (DripsStream & { id: string; created_at: number })[];
+  const hasMore = rows.length > limit;
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  return {
+    items: page.map(({ id: _id, created_at: _createdAt, ...stream }) => stream),
+    nextCursor: hasMore && last ? encodeDripsCursor({ createdAt: last.created_at, id: last.id }) : null,
+  };
+}
+
+export function getDripsStreamingTvl(token: string, network?: NetworkName): string {
+  const rows = getDb(network).prepare(
+    "SELECT balance FROM drips_streaming_balances WHERE token = ?"
+  ).all(token) as { balance: string }[];
+  return rows.reduce((sum, row) => sum + BigInt(row.balance), 0n).toString();
+}
+
 /**
  * Get all unique schedule IDs from events across all networks
  */
