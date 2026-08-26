@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { sendVerificationEmail } from "@/lib/email";
 import { isWebPushConfigured } from "@/lib/webPush";
+import { withLogging } from "@/lib/requestLogger";
 
 interface SubscribeRequest {
   email?: string;
@@ -24,7 +25,7 @@ function getDb() {
   }
 }
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export const POST = withLogging(async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const body: SubscribeRequest = await request.json();
 
@@ -177,4 +178,4 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 500 }
     );
   }
-}
+});

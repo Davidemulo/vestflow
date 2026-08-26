@@ -6,6 +6,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { withAuth } from "@/middleware/auth";
+import { withLogging } from "@/lib/requestLogger";
 
 interface CreateScheduleRequest {
   beneficiary: string;
@@ -86,4 +87,4 @@ async function handler(
   }
 }
 
-export const POST = withAuth(handler);
+export const POST = withLogging(withAuth(handler));

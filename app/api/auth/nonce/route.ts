@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { randomBytes } from "crypto";
 import { getDb } from "@/indexer/src/db";
 import { isValidStellarAddress } from "@/lib/stellar-verify";
+import { withLogging } from "@/lib/requestLogger";
 
 const NONCE_VALIDITY_MS = 5 * 60 * 1000; // 5 minutes (must match verify route)
 
@@ -9,7 +10,7 @@ const NONCE_VALIDITY_MS = 5 * 60 * 1000; // 5 minutes (must match verify route)
  * POST /api/auth/nonce
  * Issues a short-lived, single-use nonce for a wallet to sign with Freighter.
  */
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export const POST = withLogging(async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const body = await request.json();
     const { publicKey } = body;
@@ -38,4 +39,4 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     console.error("Error issuing nonce:", error);
     return NextResponse.json({ error: "Failed to issue nonce" }, { status: 500 });
   }
-}
+});

@@ -8,13 +8,14 @@ import {
 } from "@/indexer/src/db";
 import { getGapDetectionHealth } from "@/indexer/src/gap-detector";
 import { parseNetwork } from "@/indexer/src/config";
+import { withLogging } from "@/lib/requestLogger";
 
 const NETWORK = parseNetwork(process.env.NEXT_PUBLIC_NETWORK);
 const RPC_URL = process.env.NEXT_PUBLIC_NETWORK === "mainnet"
   ? "https://mainnet.sorobanrpc.com"
   : "https://soroban-testnet.stellar.org";
 
-export async function GET(): Promise<NextResponse> {
+export const GET = withLogging(async function GET(): Promise<NextResponse> {
   const checks: Record<string, string> = {};
   let allHealthy = true;
 
@@ -141,4 +142,4 @@ export async function GET(): Promise<NextResponse> {
       "Cache-Control": "no-store",
     },
   });
-}
+});

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getDb } from "@/indexer/src/db";
 import { verifyFreighterSignature, isValidStellarAddress } from "@/lib/stellar-verify";
 import { generateJWT } from "@/lib/jwt";
+import { withLogging } from "@/lib/requestLogger";
 
 const NONCE_VALIDITY_MS = 5 * 60 * 1000; // 5 minutes (must match nonce generation)
 
@@ -9,7 +10,7 @@ const NONCE_VALIDITY_MS = 5 * 60 * 1000; // 5 minutes (must match nonce generati
  * POST /api/auth/verify
  * Verifies a wallet signature and issues a JWT token.
  */
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export const POST = withLogging(async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const body = await request.json();
     const { publicKey, nonce, signedMessage } = body;
@@ -95,4 +96,4 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 500 }
     );
   }
-}
+});
