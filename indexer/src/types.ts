@@ -8,6 +8,9 @@ export type EventType =
   | "proposal_acknowledged"
   | "proposal_activated"
   | "proposal_expired"
+  | "stream_set"
+  | "given"
+  | "collected"
   | "unknown";
 
 /** A single indexed contract event row. */

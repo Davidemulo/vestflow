@@ -10,6 +10,7 @@
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\"",
     "test:pagination": "ts-node test/pagination_test.ts",
     "test:drips-api": "ts-node test/drips-api.test.ts",
+    "test:drips-events": "ts-node test/drips-events-projection.test.ts",
     "test:webhook-load": "ts-node test/webhook_load_test.ts",
     "benchmark:analytics": "ts-node --files scripts/benchmark-analytics.ts",
     "build": "tsc",
