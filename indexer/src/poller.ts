@@ -15,20 +15,28 @@
  */
 
 import { rpc as StellarRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
-import { getCheckpoint, setCheckpoint, insertEvent, computeTvlStats, insertBeneficiarySchedule } from "./db";
+import { getCheckpoint, setCheckpoint, insertEvent, computeTvlStats, insertBeneficiarySchedule, getPendingReplayCount } from "./db";
 import { materialize } from "./analytics";
 import { invalidateToday } from "./analytics-cache";
 import { getNetworkConfig, parseNetwork } from "./config";
 import { WebhookDeliveryWorker, fanOutEvent } from "./webhook-delivery";
+import { runStartupGapDetection, runPeriodicGapDetection } from "./gap-detector";
+import { ReplayEngine } from "./replay";
 import type { EventType } from "./types";
 
 const NETWORK = parseNetwork(process.env.INDEXER_NETWORK);
 const CONFIG = getNetworkConfig(NETWORK);
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS ?? "10000");
-const TVL_COMPUTE_INTERVAL_MS = Number(
-  process.env.TVL_COMPUTE_INTERVAL_MS ?? "60000"
-);
+const TVL_COMPUTE_INTERVAL_MS = Number(process.env.TVL_COMPUTE_INTERVAL_MS ?? "60000");
+const GAP_DETECTION_INTERVAL_MS = Number(process.env.GAP_DETECTION_INTERVAL_MS ?? "300000");
 const START_LEDGER = Number(process.env.START_LEDGER ?? "0");
+const ENABLE_GAP_DETECTION = process.env.ENABLE_GAP_DETECTION !== "false";
+const ENABLE_REPLAY_ENGINE = process.env.ENABLE_REPLAY_ENGINE !== "false";
+
+// Horizon URLs are configurable so self-hosters can point at a private archive node
+const HORIZON_URL: string | undefined =
+  process.env[`HORIZON_URL_${NETWORK.toUpperCase()}`] ??
+  process.env.HORIZON_URL;
 
 if (!CONFIG.contractId) {
   throw new Error(`Missing CONTRACT_ID_${NETWORK.toUpperCase()} for ${NETWORK}`);
@@ -316,6 +324,100 @@ async function poll(): Promise<void> {
   }
 }
 
+// ── Gap Detection and Replay ──────────────────────────────────────────
+
+/**
+ * Run startup gap detection to catch any missed ledgers from downtime
+ */
+async function runStartupDetection(): Promise<void> {
+  if (!ENABLE_GAP_DETECTION) {
+    console.log("[poller] Gap detection disabled");
+    return;
+  }
+
+  try {
+    console.log("[poller] Running startup gap detection...");
+    const result = await runStartupGapDetection({
+      network: NETWORK,
+      ...(HORIZON_URL ? { horizonUrl: HORIZON_URL } : {}),
+    });
+
+    if (result.gapsDetected > 0) {
+      console.log(
+        `[poller] Startup gap detection complete: found ${result.gapsDetected} gap(s) ` +
+        `covering ${result.currentLedger - result.lastCheckpoint} ledgers`
+      );
+    } else {
+      console.log("[poller] Startup gap detection complete: no gaps found");
+    }
+  } catch (error) {
+    console.error("[poller] Startup gap detection failed:", error);
+  }
+}
+
+/**
+ * Start the background replay engine
+ */
+function startReplayEngine(): ReplayEngine | null {
+  if (!ENABLE_REPLAY_ENGINE) {
+    console.log("[poller]   Replay   : disabled (ENABLE_REPLAY_ENGINE=false)");
+    return null;
+  }
+
+  try {
+    const replayEngine = new ReplayEngine({
+      network: NETWORK,
+      batchSize: Number(process.env.REPLAY_BATCH_SIZE ?? "200"),
+      maxRetries: Number(process.env.REPLAY_MAX_RETRIES ?? "8"),
+      retryDelayMs: Number(process.env.REPLAY_RETRY_DELAY_MS ?? "1000"),
+      progressUpdateInterval: Number(process.env.REPLAY_PROGRESS_INTERVAL ?? "100"),
+      webhookDelivery: true,
+    });
+
+    // Start the replay worker
+    void replayEngine.start().catch((error) => {
+      console.error("[poller] Replay engine crashed:", error);
+    });
+
+    console.log("[poller]   Replay   : background worker started");
+    
+    const shutdown = () => {
+      replayEngine.stop();
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
+
+    return replayEngine;
+  } catch (error) {
+    console.error("[poller] Failed to start replay engine:", error);
+    return null;
+  }
+}
+
+/**
+ * Run periodic gap detection to catch live polling failures
+ */
+async function runPeriodicDetection(): Promise<void> {
+  if (!ENABLE_GAP_DETECTION) return;
+
+  try {
+    const result = await runPeriodicGapDetection({
+      network: NETWORK,
+      ...(HORIZON_URL ? { horizonUrl: HORIZON_URL } : {}),
+    });
+    
+    if (result.gapsDetected > 0) {
+      console.warn(
+        `[poller] Periodic gap detection found ${result.gapsDetected} gap(s) - ` +
+        'live polling may be missing events'
+      );
+    }
+  } catch (error) {
+    console.error("[poller] Periodic gap detection failed:", error);
+    // Don't fail - this is a background health check
+  }
+}
+
 // ── Webhook delivery ──────────────────────────────────────────────────
 
 /**
@@ -339,12 +441,6 @@ function startWebhookWorker(): WebhookDeliveryWorker | null {
     `[poller]   Webhooks : delivering with ${worker.concurrency} concurrent senders`
   );
 
-  const shutdown = () => {
-    void worker.stop().finally(() => process.exit(0));
-  };
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
-
   return worker;
 }
 
@@ -357,16 +453,56 @@ async function run(): Promise<void> {
   console.log(`[poller]   RPC      : ${CONFIG.rpcUrl}`);
   console.log(`[poller]   Interval : ${POLL_INTERVAL_MS} ms`);
   console.log(`[poller]   TVL job  : every ${TVL_COMPUTE_INTERVAL_MS} ms`);
+  console.log(`[poller]   Gap check: every ${GAP_DETECTION_INTERVAL_MS} ms (enabled: ${ENABLE_GAP_DETECTION})`);
+  console.log(`[poller]   Replay   : enabled: ${ENABLE_REPLAY_ENGINE}`);
+  if (HORIZON_URL) console.log(`[poller]   Horizon  : ${HORIZON_URL}`);
   console.log(`[poller]   Checkpoint: ledger ${getCheckpoint(NETWORK)}`);
 
-  startWebhookWorker();
+  // Run startup gap detection before starting normal polling
+  await runStartupDetection();
+
+  // Start background services
+  const webhookWorker = startWebhookWorker();
+  const replayEngine = startReplayEngine();
+
+  // Graceful shutdown handling
+  let isShuttingDown = false;
+  const shutdown = async () => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    
+    console.log("[poller] Shutting down gracefully...");
+    
+    // Stop replay engine first to avoid new work
+    if (replayEngine) {
+      console.log("[poller] Stopping replay engine...");
+      replayEngine.stop();
+    }
+    
+    // Stop webhook worker
+    if (webhookWorker) {
+      console.log("[poller] Stopping webhook worker...");
+      await webhookWorker.stop();
+    }
+    
+    console.log("[poller] Shutdown complete");
+    process.exit(0);
+  };
+
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 
   let lastTvlCompute = 0;
+  let lastGapDetection = 0;
 
   // Poll immediately on start, then on each interval.
-  while (true) {
-    await poll();
+  while (!isShuttingDown) {
     const now = Date.now();
+
+    // Run normal event polling
+    await poll();
+    
+    // Periodic tasks
     if (now - lastTvlCompute >= TVL_COMPUTE_INTERVAL_MS) {
       const tvl = computeTvlStats(NETWORK);
       lastTvlCompute = now;
@@ -374,7 +510,22 @@ async function run(): Promise<void> {
         `[poller] TVL refreshed for ${tvl.assets.length} asset(s): ${tvl.total_value_locked}`
       );
     }
-    await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+
+    // Periodic gap detection
+    if (now - lastGapDetection >= GAP_DETECTION_INTERVAL_MS) {
+      await runPeriodicDetection();
+      lastGapDetection = now;
+      
+      // Log replay queue status
+      const pendingReplays = getPendingReplayCount(NETWORK);
+      if (pendingReplays > 0) {
+        console.log(`[poller] Replay queue status: ${pendingReplays} ranges pending`);
+      }
+    }
+
+    if (!isShuttingDown) {
+      await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
   }
 }
 
