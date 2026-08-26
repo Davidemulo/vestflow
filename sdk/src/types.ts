@@ -74,6 +74,19 @@ export interface ScheduleData {
 }
 
 /**
+ * Result returned by {@link VestflowClient.collect}.
+ *
+ * When there are no claimable tokens the transaction is not submitted:
+ * `collected` is `0n` and `txHash` is an empty string.
+ */
+export interface CollectResult {
+  /** Tokens transferred to the beneficiary, in stroops. */
+  collected: bigint;
+  /** Transaction hash, or an empty string when nothing was collected. */
+  txHash: string;
+}
+
+/**
  * Configuration for the VestflowClient.
  */
 export interface VestflowConfig {

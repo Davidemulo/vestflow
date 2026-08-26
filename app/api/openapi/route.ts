@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { withLogging } from "@/lib/requestLogger";
 
 /**
  * Hand-authored OpenAPI 3 spec for VestFlow's API routes (#210).
@@ -317,6 +318,6 @@ const openApiSpec = {
   },
 };
 
-export async function GET() {
+export const GET = withLogging(async function GET() {
   return NextResponse.json(openApiSpec);
-}
+});

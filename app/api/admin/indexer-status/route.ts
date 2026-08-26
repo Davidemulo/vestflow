@@ -18,10 +18,11 @@ import {
   type GapDetectionConfig 
 } from "@/indexer/src/gap-detector";
 import { parseNetwork, getNetworkConfig } from "@/indexer/src/config";
+import { withLogging } from "@/lib/requestLogger";
 
 const NETWORK = parseNetwork(process.env.NEXT_PUBLIC_NETWORK);
 
-export async function GET(request: NextRequest): Promise<NextResponse> {
+export const GET = withLogging(async function GET(request: NextRequest): Promise<NextResponse> {
   try {
     const { searchParams } = new URL(request.url);
     const includeQueueDetails = searchParams.get('queue_details') === 'true';
@@ -161,12 +162,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       }
     );
   }
-}
+});
 
 /**
  * POST endpoint for administrative actions
  */
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export const POST = withLogging(async function POST(request: NextRequest): Promise<NextResponse> {
   try {
     const body = await request.json();
     const { action } = body;
@@ -235,4 +236,4 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       { status: 500 }
     );
   }
-}
+});

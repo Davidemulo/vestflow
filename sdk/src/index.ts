@@ -30,6 +30,7 @@ export type {
   GradedMilestone,
   VestingKind,
   ClaimDelegation,
+  CollectResult,
   TransactionResult,
   BalanceResult,
   SplitsReceiver,

@@ -8,6 +8,7 @@ import {
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { getOrSetCache } from "@/lib/redisCache";
 import { NextRequest, NextResponse } from "next/server";
+import { withLogging } from "@/lib/requestLogger";
 
 // Short TTL read-through cache (#206) — schedule state changes slowly (once
 // per claim/revoke), so a repeat visitor within this window gets served
@@ -46,7 +47,7 @@ function calculateNextUnlock(schedule: any, now: number): number | null {
   return endTime;
 }
 
-export async function GET(
+export const GET = withLogging(async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse> {
@@ -135,4 +136,4 @@ export async function GET(
       { status: 500 }
     );
   }
-}
+});

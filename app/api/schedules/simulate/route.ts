@@ -1,10 +1,11 @@
 import { getClaimable, getClaimableAtTimestamp, getVestedAmountAt, NETWORK } from "@/lib/stellar";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { NextRequest, NextResponse } from "next/server";
+import { withLogging } from "@/lib/requestLogger";
 
 const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
-export async function POST(request: NextRequest): Promise<NextResponse> {
+export const POST = withLogging(async function POST(request: NextRequest): Promise<NextResponse> {
   const rateLimitResponse = await rateLimiter(request);
   if (rateLimitResponse) return rateLimitResponse;
 
@@ -60,4 +61,4 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     console.error("Error simulating claim:", error);
     return NextResponse.json({ error: "Simulation failed" }, { status: 500 });
   }
-}
+});

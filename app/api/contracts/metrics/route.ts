@@ -2,10 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import path from "path";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
+import { withLogging } from "@/lib/requestLogger";
 
 const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
-export async function GET(request: NextRequest): Promise<NextResponse> {
+export const GET = withLogging(async function GET(request: NextRequest): Promise<NextResponse> {
   const rateLimitResponse = await rateLimiter(request);
   if (rateLimitResponse) {
     return rateLimitResponse;
@@ -29,4 +30,4 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       { status: 503 }
     );
   }
-}
+});

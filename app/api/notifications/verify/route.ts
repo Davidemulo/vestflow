@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createEndpointSpecificRateLimiter } from "@/lib/rateLimit";
 import { getVapidPublicKey, isWebPushConfigured } from "@/lib/webPush";
+import { withLogging } from "@/lib/requestLogger";
 
 const rateLimiter = createEndpointSpecificRateLimiter(60000, 10, "verify");
 
@@ -15,7 +16,7 @@ function getDb() {
   }
 }
 
-export async function GET(request: NextRequest): Promise<NextResponse> {
+export const GET = withLogging(async function GET(request: NextRequest): Promise<NextResponse> {
   const rateLimitResponse = await rateLimiter(request);
   if (rateLimitResponse) {
     return rateLimitResponse;
@@ -88,4 +89,4 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       { status: 500 }
     );
   }
-}
+});
