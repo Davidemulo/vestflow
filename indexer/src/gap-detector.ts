@@ -64,7 +64,9 @@ export async function getCurrentLedgerFromHorizon(
       throw new Error(`Horizon API error: ${response.status} ${response.statusText}`);
     }
 
-    const data = await response.json();
+    const data = await response.json() as {
+      _embedded?: { records?: Array<{ sequence?: unknown }> };
+    };
     const records = data._embedded?.records;
     
     if (!Array.isArray(records) || records.length === 0) {

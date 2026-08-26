@@ -16,6 +16,8 @@
 
 import { rpc as StellarRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
 import { getCheckpoint, setCheckpoint, insertEvent, computeTvlStats, insertBeneficiarySchedule, getPendingReplayCount } from "./db";
+import { materialize } from "./analytics";
+import { invalidateToday } from "./analytics-cache";
 import { getNetworkConfig, parseNetwork } from "./config";
 import { WebhookDeliveryWorker, fanOutEvent } from "./webhook-delivery";
 import { runStartupGapDetection, runPeriodicGapDetection } from "./gap-detector";
@@ -135,6 +137,10 @@ async function poll(): Promise<void> {
         let amount: string | null = null;
         let token: string | null = null;
         let createdAmount: string | null = null;
+        let startTime: number | null = null;
+        let duration: number | null = null;
+        let cliffDuration: number | null = null;
+        let vestingKind: string | null = null;
 
         switch (eventType) {
           case "schedule_created":
@@ -157,6 +163,17 @@ async function poll(): Promise<void> {
             createdAmount = valueArr[3] != null && scheduleId === Number(topics[1])
               ? String(valueArr[3])
               : valueArr[1] != null ? String(valueArr[1]) : null;
+            // Vesting curve params: only present in the current event shape
+            // (grantor, beneficiary, token, total_amount, start_time,
+            // duration, cliff_duration, vesting_kind, ...). Older replayed
+            // events lack these — the analytics worker falls back to
+            // claimed-only accounting when they're null.
+            if (scheduleId === Number(topics[1])) {
+              startTime = valueArr[4] != null ? Number(valueArr[4]) : null;
+              duration = valueArr[5] != null ? Number(valueArr[5]) : null;
+              cliffDuration = valueArr[6] != null ? Number(valueArr[6]) : null;
+              vestingKind = valueArr[7] != null ? String(valueArr[7]) : null;
+            }
             break;
           case "claimed":
             // topics: ["claimed", beneficiary, token]
@@ -218,6 +235,10 @@ async function poll(): Promise<void> {
           amount,
           token,
           created_amount: createdAmount,
+          start_time: startTime,
+          duration,
+          cliff_duration: cliffDuration,
+          vesting_kind: vestingKind,
           raw_topics: jsonStringify(topics),
           raw_value: jsonStringify(value),
         }, NETWORK);
@@ -275,6 +296,24 @@ async function poll(): Promise<void> {
       );
     } else {
       console.log(`[poller] No new events. Checkpoint: ledger ${highestLedger}.`);
+    }
+
+    // Fold newly ingested (and any previously unmaterialized, e.g. from a
+    // replay) events into the analytics snapshot tables. Cheap no-op when
+    // there's nothing pending.
+    try {
+      const result = materialize(NETWORK);
+      if (result.events_processed > 0) {
+        console.log(
+          `[poller] Analytics: materialized ${result.events_processed} event(s) → ` +
+            `${result.schedules_affected} schedule(s), ${result.tokens_affected} token(s), ${result.grantors_affected} grantor(s).`
+        );
+        // Today's TVL numbers just changed; historical days are untouched
+        // and stay cached.
+        invalidateToday();
+      }
+    } catch (err) {
+      console.error("[poller] Analytics materialization failed:", err);
     }
   } catch (err) {
     // Log but do not crash — the loop will retry on the next interval.
