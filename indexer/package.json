@@ -10,7 +10,7 @@
     "dev:all": "concurrently \"npm run dev\" \"npm run dev:server\"",
     "test:pagination": "ts-node test/pagination_test.ts",
     "test:webhook-load": "ts-node test/webhook_load_test.ts",
-    "benchmark:analytics": "ts-node scripts/benchmark-analytics.ts",
+    "benchmark:analytics": "ts-node --files scripts/benchmark-analytics.ts",
     "build": "tsc",
     "start": "node dist/poller.js",
     "start:server": "node dist/server.js"

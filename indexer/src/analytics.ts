@@ -85,7 +85,7 @@ export function vestedAt(params: VestingParams, atSeconds: number): bigint | nul
     return elapsed >= cliff_duration ? total_amount : 0n;
   }
 
-  if (kind === "LinearWithCliff" || kind === "Cliff+Linear") {
+  if (kind === "LinearWithCliff") {
     if (elapsed < cliff_duration) return 0n;
     const linearDuration = BigInt(duration - cliff_duration);
     const linearElapsed = BigInt(elapsed - cliff_duration);
