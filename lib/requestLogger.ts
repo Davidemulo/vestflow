@@ -16,10 +16,11 @@ export function logRequest(entry: RequestLogEntry): void {
   console.log(JSON.stringify(entry));
 }
 
-export function withLogging(
-  handler: (request: NextRequest) => Promise<NextResponse>
+export function withLogging<TArgs extends any[]>(
+  handler: (...args: TArgs) => Promise<NextResponse>
 ) {
-  return async (request: NextRequest): Promise<NextResponse> => {
+  return async (...args: TArgs): Promise<NextResponse> => {
+    const request = args[0] as NextRequest;
     const { pathname } = request.nextUrl;
     const method = request.method;
     const requestId = request.headers.get(REQUEST_ID_HEADER) || "unknown";
@@ -28,7 +29,7 @@ export function withLogging(
 
     let status = 500;
     try {
-      const response = await handler(request);
+      const response = await handler(...args);
       status = response.status;
       return response;
     } catch (error) {
