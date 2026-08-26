@@ -1,6 +1,7 @@
 "use client";
 import Navbar from "@/components/Navbar";
 import CopyButton from "@/components/CopyButton";
+import CopyLinkButton from "@/components/CopyLinkButton";
 import VestingChart from "@/components/VestingChart";
 import NotificationSubscription from "@/components/NotificationSubscription";
 import AddressLabel from "@/components/AddressLabel";
@@ -115,11 +116,16 @@ export default function ScheduleView({ schedule, claimable: initialClaimable }: 
           <Link href="/" className="text-zinc-400 hover:text-zinc-300 transition-colors text-sm mb-4 inline-block">
             ← Back to home
           </Link>
-          <div className="flex items-center justify-between mb-4">
-            <h1 className="text-3xl font-bold">Vesting Schedule #{schedule.id}</h1>
-            <span className={`text-sm font-semibold px-3 py-1 rounded-full border ${statusColor} border-current/20 bg-current/5`}>
-              {status}
-            </span>
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
+            <div className="flex items-center gap-3 flex-wrap">
+              <h1 className="text-3xl font-bold">Vesting Schedule #{schedule.id}</h1>
+              <span className={`text-sm font-semibold px-3 py-1 rounded-full border ${statusColor} border-current/20 bg-current/5`}>
+                {status}
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <CopyLinkButton label="Copy Link" />
+            </div>
           </div>
           <p className="text-zinc-400">Network: {NETWORK === "mainnet" ? "Stellar Mainnet" : "Stellar Testnet"}</p>
         </div>

@@ -121,6 +121,7 @@ export default function Navbar() {
         <Link href="/app/history" className="hover:text-white transition-colors">History</Link>
         <Link href="/app/beneficiary" className="hover:text-white transition-colors">Beneficiary</Link>
         <Link href="/app/create" className="hover:text-white transition-colors">New Schedule</Link>
+        <Link href="/lists" className="hover:text-white transition-colors">Lists</Link>
         <Link href="/analytics" className="hover:text-white transition-colors">Analytics</Link>
         <Link href="/widget" className="hover:text-white transition-colors">Widget</Link>
         <Link href="/learn" className="hover:text-white transition-colors">Learn</Link>

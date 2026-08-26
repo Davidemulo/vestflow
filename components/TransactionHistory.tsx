@@ -1,8 +1,11 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { NETWORK, stroopsToXlm } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
+import SearchFilterBar from "@/components/SearchFilterBar";
+import { NoSearchResultsEmptyState } from "@/components/EmptyState";
+import { matchesAddressOrToken } from "@/lib/tokens";
 
 interface IndexedEvent {
   id: string;
@@ -40,6 +43,7 @@ export default function TransactionHistory() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [page, setPage] = useState(1);
+  const [query, setQuery] = useState("");
 
   useEffect(() => {
     if (!publicKey) return;
@@ -61,8 +65,30 @@ export default function TransactionHistory() {
       .finally(() => setLoading(false));
   }, [publicKey]);
 
-  // Reset to page 1 when events change
-  useEffect(() => { setPage(1); }, [events.length]);
+  // Client-side filtering by address prefix, token symbol, or schedule ID (Issue #647)
+  const q = query.trim().toLowerCase();
+  const filteredEvents = useMemo(() => {
+    if (!q) return events;
+    return events.filter(e => {
+      // Check schedule ID match (e.g. "12" or "#12")
+      if (e.schedule_id !== null && (e.schedule_id.toString() === q || `#${e.schedule_id}` === q)) {
+        return true;
+      }
+      // Check event type match ("claim", "revoke")
+      if (e.event_type.toLowerCase().includes(q)) {
+        return true;
+      }
+      // Check address prefix / token match
+      return matchesAddressOrToken(
+        q,
+        [e.grantor, e.beneficiary],
+        [e.token]
+      );
+    });
+  }, [events, q]);
+
+  // Reset to page 1 when filtered events count changes
+  useEffect(() => { setPage(1); }, [filteredEvents.length]);
 
   if (!publicKey) {
     return (
@@ -96,103 +122,123 @@ export default function TransactionHistory() {
     );
   }
 
-  const totalPages = Math.max(1, Math.ceil(events.length / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil(filteredEvents.length / PAGE_SIZE));
   const pageStart = (page - 1) * PAGE_SIZE;
-  const paginated = events.slice(pageStart, pageStart + PAGE_SIZE);
+  const paginated = filteredEvents.slice(pageStart, pageStart + PAGE_SIZE);
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-white/5">
-              <th className="text-left py-3 pr-4 font-medium">Type</th>
-              <th className="text-left py-3 pr-4 font-medium">Schedule</th>
-              <th className="text-left py-3 pr-4 font-medium">Amount</th>
-              <th className="text-left py-3 pr-4 font-medium">Date</th>
-              <th className="text-left py-3 font-medium">Ledger</th>
-            </tr>
-          </thead>
-          <tbody>
-            {paginated.map(event => (
-              <tr
-                key={event.id}
-                className="border-b border-white/5 hover:bg-white/3 transition-colors"
-              >
-                <td className="py-3 pr-4">
-                  {event.event_type === "claimed" ? (
-                    <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-green-500/10 text-green-400">
-                      Claim
-                    </span>
-                  ) : (
-                    <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-red-500/10 text-red-400">
-                      Revoke
-                    </span>
-                  )}
-                </td>
-                <td className="py-3 pr-4 text-zinc-300">
-                  {event.schedule_id !== null ? (
-                    <Link
-                      href={`/schedule/${event.schedule_id}`}
-                      className="hover:text-violet-400 transition-colors"
-                    >
-                      #{event.schedule_id}
-                    </Link>
-                  ) : (
-                    <span className="text-zinc-600">—</span>
-                  )}
-                </td>
-                <td className="py-3 pr-4 text-zinc-300 font-mono">
-                  {event.event_type === "claimed" && event.amount !== null
-                    ? `${stroopsToXlm(BigInt(event.amount))} XLM`
-                    : <span className="text-zinc-600">—</span>}
-                </td>
-                <td className="py-3 pr-4 text-zinc-400">
-                  {formatEventDate(event.ledger_closed_at)}
-                </td>
-                <td className="py-3">
-                  <a
-                    href={`https://stellar.expert/explorer/${NETWORK}/ledger/${event.ledger}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-violet-400 hover:underline font-mono text-xs"
-                  >
-                    {event.ledger}
-                  </a>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      {/* Search / Filter bar (Issue #647) */}
+      <div className="mb-2">
+        <SearchFilterBar
+          value={query}
+          onChange={setQuery}
+          placeholder="Filter history by address prefix, token symbol, schedule ID, or event type…"
+          resultCount={filteredEvents.length}
+          totalCount={events.length}
+        />
       </div>
 
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between flex-wrap gap-3">
-          <p className="text-sm text-zinc-500">
-            Showing{" "}
-            <span className="text-zinc-300">
-              {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, events.length)}
-            </span>{" "}
-            of <span className="text-zinc-300">{events.length}</span> events
-          </p>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setPage(p => Math.max(1, p - 1))}
-              disabled={page === 1}
-              className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
-            >
-              ← Previous
-            </button>
-            <span className="text-sm text-zinc-500">{page} / {totalPages}</span>
-            <button
-              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-              disabled={page === totalPages}
-              className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
-            >
-              Next →
-            </button>
+      {filteredEvents.length === 0 ? (
+        <NoSearchResultsEmptyState
+          searchQuery={query}
+          onClearSearch={() => setQuery("")}
+        />
+      ) : (
+        <>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-xs text-zinc-500 uppercase tracking-wider border-b border-white/5">
+                  <th className="text-left py-3 pr-4 font-medium">Type</th>
+                  <th className="text-left py-3 pr-4 font-medium">Schedule</th>
+                  <th className="text-left py-3 pr-4 font-medium">Amount</th>
+                  <th className="text-left py-3 pr-4 font-medium">Date</th>
+                  <th className="text-left py-3 font-medium">Ledger</th>
+                </tr>
+              </thead>
+              <tbody>
+                {paginated.map(event => (
+                  <tr
+                    key={event.id}
+                    className="border-b border-white/5 hover:bg-white/3 transition-colors"
+                  >
+                    <td className="py-3 pr-4">
+                      {event.event_type === "claimed" ? (
+                        <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-green-500/10 text-green-400">
+                          Claim
+                        </span>
+                      ) : (
+                        <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-red-500/10 text-red-400">
+                          Revoke
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-3 pr-4 text-zinc-300">
+                      {event.schedule_id !== null ? (
+                        <Link
+                          href={`/schedule/${event.schedule_id}`}
+                          className="hover:text-violet-400 transition-colors"
+                        >
+                          #{event.schedule_id}
+                        </Link>
+                      ) : (
+                        <span className="text-zinc-600">—</span>
+                      )}
+                    </td>
+                    <td className="py-3 pr-4 text-zinc-300 font-mono">
+                      {event.event_type === "claimed" && event.amount !== null
+                        ? `${stroopsToXlm(BigInt(event.amount))} XLM`
+                        : <span className="text-zinc-600">—</span>}
+                    </td>
+                    <td className="py-3 pr-4 text-zinc-400">
+                      {formatEventDate(event.ledger_closed_at)}
+                    </td>
+                    <td className="py-3">
+                      <a
+                        href={`https://stellar.expert/explorer/${NETWORK}/ledger/${event.ledger}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-violet-400 hover:underline font-mono text-xs"
+                      >
+                        {event.ledger}
+                      </a>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-        </div>
+
+          {totalPages > 1 && (
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <p className="text-sm text-zinc-500">
+                Showing{" "}
+                <span className="text-zinc-300">
+                  {pageStart + 1}–{Math.min(pageStart + PAGE_SIZE, filteredEvents.length)}
+                </span>{" "}
+                of <span className="text-zinc-300">{filteredEvents.length}</span> events
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setPage(p => Math.max(1, p - 1))}
+                  disabled={page === 1}
+                  className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
+                >
+                  ← Previous
+                </button>
+                <span className="text-sm text-zinc-500">{page} / {totalPages}</span>
+                <button
+                  onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                  disabled={page === totalPages}
+                  className="text-sm text-zinc-400 hover:text-white border border-white/10 rounded-lg px-3 py-1.5 transition-colors disabled:opacity-40"
+                >
+                  Next →
+                </button>
+              </div>
+            </div>
+          )}
+        </>
       )}
     </div>
   );

@@ -121,6 +121,7 @@ CREATE TABLE IF NOT EXISTS drips_lists (
   owner                      TEXT NOT NULL,
   token                      TEXT NOT NULL,
   total_funding_rate_per_sec TEXT NOT NULL DEFAULT '0',
+  target_rate_per_sec        TEXT NOT NULL DEFAULT '0',
   created_at                 INTEGER NOT NULL DEFAULT (unixepoch())
 );
 

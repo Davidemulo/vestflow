@@ -41,7 +41,7 @@ async function run(): Promise<void> {
     assert.equal(lists.status, 200);
     assert.deepEqual(lists.body.lists[0], {
       id: "list-1", name: "Team", owner: OWNER, token: "TOKEN",
-      total_funding_rate_per_sec: "55", member_count: 2,
+      total_funding_rate_per_sec: "55", target_rate_per_sec: "0", member_count: 2,
     });
 
     const members = await request(server, "/lists/list-1/members?limit=1");
