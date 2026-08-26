@@ -24,6 +24,7 @@ export function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
+  // Echo client-sent X-Request-ID or generate a new one
   const requestId =
     request.headers.get(REQUEST_ID_HEADER) || generateRequestId();
   const startMs = Date.now();
@@ -37,6 +38,9 @@ export function middleware(request: NextRequest) {
       },
     },
   });
+
+  // Set X-Request-ID on the response so the client can correlate
+  response.headers.set(REQUEST_ID_HEADER, requestId);
 
   return response;
 }
