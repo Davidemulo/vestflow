@@ -14,6 +14,7 @@ export {
   formatDate,
   parseContractError,
   formatSchedule,
+  formatRate,
 } from "./utils";
 export type { ScheduleSummary } from "./utils";
 export { isScheduleRevoked } from "./types";
@@ -29,4 +30,9 @@ export type {
   GradedMilestone,
   VestingKind,
   ClaimDelegation,
+  CollectResult,
+  TransactionResult,
+  BalanceResult,
+  SplitsReceiver,
+  SplitsConfig,
 } from "./types";

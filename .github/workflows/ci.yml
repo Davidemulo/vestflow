@@ -118,7 +118,31 @@ jobs:
               -tee
         working-directory: contracts
 
-  # ── 6. Testnet E2E Tests ─────────────────────────────────────
+  # ── 6. Analytics performance benchmark ────────────────────────
+  analytics-benchmark:
+    name: Analytics Benchmark (p99 < 100ms)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: indexer/package-lock.json
+
+      - name: Install indexer dependencies
+        run: npm ci
+        working-directory: indexer
+
+      - name: Seed 1M events and benchmark /analytics/* endpoints
+        run: npm run benchmark:analytics
+        working-directory: indexer
+        env:
+          INDEXER_DB_PATH: /tmp/analytics-benchmark.db
+        continue-on-error: true
+
+  # ── 7. Testnet E2E Tests ─────────────────────────────────────
   testnet-e2e:
     name: Testnet E2E Tests
     runs-on: ubuntu-latest

@@ -93,6 +93,7 @@ const hash = await client.createSchedule({ ... }, nodeSigner);
 | `contractId` | `string` | Deployed testnet ID | Override contract address |
 | `rpcUrl` | `string` | Public endpoint | Override Soroban RPC URL |
 | `nativeToken` | `string` | Testnet XLM SAC | Override native token SAC |
+| `indexerUrl` | `string` | `http://localhost:3001` | Override indexer service base URL |
 
 ### Read Methods
 
@@ -107,6 +108,8 @@ const hash = await client.createSchedule({ ... }, nodeSigner);
 | `getScheduleBatch(ids, publicKey?)` | `Promise<(ScheduleData \| null)[]>` | Fetch multiple schedules in one call |
 | `getRemainingUnvested(id, publicKey?)` | `Promise<bigint>` | Unvested remainder (what a revoke would recover) |
 | `getAllSchedules(publicKey?)` | `Promise<ScheduleData[]>` | All schedules |
+| `getBalance(account, token, publicKey?)` | `Promise<BalanceResult>` | Live streaming balance and collectable amount, via simulation |
+| `getSplits(account)` | `Promise<SplitsConfig>` | Current splits configuration for an account, from the indexer |
 
 ### Write Methods
 
@@ -115,6 +118,7 @@ const hash = await client.createSchedule({ ... }, nodeSigner);
 | `createSchedule(params, signer)` | `Promise<string>` | Create a new vesting schedule |
 | `claimVested(publicKey, id, signer)` | `Promise<string>` | Claim vested tokens |
 | `revokeSchedule(publicKey, id, signer)` | `Promise<string>` | Revoke a schedule (grantor only) |
+| `give(sender, receiver, token, amount, signer)` | `Promise<TransactionResult>` | Send a one-time direct payment, bypassing any schedule |
 
 ### Utilities
 
@@ -126,6 +130,7 @@ const hash = await client.createSchedule({ ... }, nodeSigner);
 | `vestingProgress(schedule, now)` | Vesting progress percentage (0-100) |
 | `formatDate(timestamp)` | Format Unix timestamp as date string |
 | `parseContractError(error)` | Map contract error to user-friendly message |
+| `formatRate(amtPerSec, token, decimals)` | Format a per-second flow rate, e.g. "0.008640 XLM / day" |
 
 ## License
 
