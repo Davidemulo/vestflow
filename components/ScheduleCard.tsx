@@ -25,7 +25,7 @@ export default function ScheduleCard({
   onAction,
 }: {
   schedule: ScheduleData;
-  onAction: () => void;
+  onAction?: () => void;
 }) {
   const { publicKey } = useWallet();
   const [showChart, setShowChart] = useState(false);
@@ -306,7 +306,7 @@ export default function ScheduleCard({
         tokenSymbol={tokenSymbol}
         open={showClaimModal}
         onClose={() => setShowClaimModal(false)}
-        onSuccess={() => { setShowClaimModal(false); onAction(); }}
+        onSuccess={() => { setShowClaimModal(false); onAction?.(); }}
       />
       <RevokeModal
         schedule={schedule}
@@ -314,13 +314,13 @@ export default function ScheduleCard({
         tokenSymbol={tokenSymbol}
         open={showRevokeModal}
         onClose={() => setShowRevokeModal(false)}
-        onSuccess={() => { setShowRevokeModal(false); onAction(); }}
+        onSuccess={() => { setShowRevokeModal(false); onAction?.(); }}
       />
       <TransferBeneficiaryModal
         schedule={schedule}
         open={showTransferModal}
         onClose={() => setShowTransferModal(false)}
-        onSuccess={() => { setShowTransferModal(false); onAction(); }}
+        onSuccess={() => { setShowTransferModal(false); onAction?.(); }}
       />
     </div>
   );

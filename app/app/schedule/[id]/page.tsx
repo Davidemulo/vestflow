@@ -9,6 +9,7 @@ import ClaimModal from "@/components/ClaimModal";
 import TransferBeneficiaryModal from "@/components/TransferBeneficiaryModal";
 import AddressLabel from "@/components/AddressLabel";
 import BeneficiaryQrModal from "@/components/BeneficiaryQrModal";
+import CopyLinkButton from "@/components/CopyLinkButton";
 import {
   getSchedule,
   getClaimableAtTimestamp,
@@ -260,16 +261,19 @@ export default function ScheduleDetailPage() {
 
         <div className="card p-6 flex flex-col gap-6">
           {/* Header */}
-          <div className="flex items-start justify-between">
+          <div className="flex items-start justify-between flex-wrap gap-3">
             <div>
               <h1 className="text-2xl font-bold">Schedule #{schedule.id}</h1>
               <p className="text-zinc-400 mt-1 text-sm">
                 {schedule.kind} vesting{schedule.revocable ? " · revocable" : ""}
               </p>
             </div>
-            <span className={`text-sm font-medium px-3 py-1 rounded-full ${statusColor}`}>
-              {statusLabel}
-            </span>
+            <div className="flex items-center gap-2">
+              <CopyLinkButton label="Copy Link" />
+              <span className={`text-sm font-medium px-3 py-1 rounded-full ${statusColor}`}>
+                {statusLabel}
+              </span>
+            </div>
           </div>
 
           {/* Vesting Curve — always visible on the detail page */}

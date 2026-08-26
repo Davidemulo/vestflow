@@ -220,6 +220,7 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
     ensureColumn(db, "schedule_events", "cliff_duration", "cliff_duration INTEGER");
     ensureColumn(db, "schedule_events", "vesting_kind", "vesting_kind TEXT");
     ensureColumn(db, "schedule_events", "materialized_at", "materialized_at INTEGER");
+    ensureColumn(db, "drips_lists", "target_rate_per_sec", "target_rate_per_sec TEXT NOT NULL DEFAULT '0'");
     db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_proposal_id ON schedule_events (proposal_id)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_materialized_at ON schedule_events (materialized_at)");
@@ -784,6 +785,7 @@ export interface DripsList {
   owner: string;
   member_count: number;
   total_funding_rate_per_sec: string;
+  target_rate_per_sec: string;
   token: string;
 }
 
@@ -848,7 +850,8 @@ export function queryDripsLists(params: {
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const limit = boundedPageSize(params.limit);
   const rows = getDb(params.network).prepare(
-    `SELECT l.id, l.name, l.owner, l.token, l.total_funding_rate_per_sec, l.created_at,
+    `SELECT l.id, l.name, l.owner, l.token, l.total_funding_rate_per_sec,
+       COALESCE(l.target_rate_per_sec, '0') AS target_rate_per_sec, l.created_at,
        COUNT(m.address) AS member_count
      FROM drips_lists l
      LEFT JOIN drips_list_members m ON m.list_id = l.id AND m.left_at IS NULL
@@ -1718,4 +1721,49 @@ export function getLastGapDetection(network?: NetworkName): GapDetectionLogEntry
     )
     .get() as GapDetectionLogEntry | undefined;
   return row || null;
+}
+
+
+export function queryDripsList(params: {
+  listId: string;
+  network?: NetworkName;
+}): DripsList | "not_found" {
+  const db = getDb(params.network);
+  const row = db.prepare(
+    `SELECT l.id, l.name, l.owner, l.token, l.total_funding_rate_per_sec,
+       COALESCE(l.target_rate_per_sec, '0') AS target_rate_per_sec,
+       COUNT(m.address) AS member_count
+     FROM drips_lists l
+     LEFT JOIN drips_list_members m ON m.list_id = l.id AND m.left_at IS NULL
+     WHERE l.id = ?
+     GROUP BY l.id`
+  ).get(params.listId) as DripsList | undefined;
+
+  if (!row) return "not_found";
+  return row;
+}
+
+export function updateDripsListTargetRate(params: {
+  listId: string;
+  owner?: string;
+  targetRatePerSec: string;
+  network?: NetworkName;
+}): { success: boolean; list?: DripsList; error?: string } {
+  const db = getDb(params.network);
+  const existing = queryDripsList({ listId: params.listId, network: params.network });
+  if (existing === "not_found") {
+    return { success: false, error: "List not found" };
+  }
+  if (params.owner && existing.owner !== params.owner) {
+    return { success: false, error: "Only the list owner can update the target rate" };
+  }
+
+  db.prepare("UPDATE drips_lists SET target_rate_per_sec = ? WHERE id = ?")
+    .run(params.targetRatePerSec, params.listId);
+
+  const updated = queryDripsList({ listId: params.listId, network: params.network });
+  return {
+    success: true,
+    list: updated === "not_found" ? undefined : updated,
+  };
 }
