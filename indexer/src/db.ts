@@ -204,8 +204,14 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
     ensureColumn(db, "schedule_events", "token", "token TEXT");
     ensureColumn(db, "schedule_events", "created_amount", "created_amount TEXT");
     ensureColumn(db, "schedule_events", "proposal_id", "proposal_id INTEGER");
+    ensureColumn(db, "schedule_events", "start_time", "start_time INTEGER");
+    ensureColumn(db, "schedule_events", "duration", "duration INTEGER");
+    ensureColumn(db, "schedule_events", "cliff_duration", "cliff_duration INTEGER");
+    ensureColumn(db, "schedule_events", "vesting_kind", "vesting_kind TEXT");
+    ensureColumn(db, "schedule_events", "materialized_at", "materialized_at INTEGER");
     db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_proposal_id ON schedule_events (proposal_id)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_materialized_at ON schedule_events (materialized_at)");
     migrateEventTypeCheck(db);
     ensureEventDedupIndex(db);
     dbs.set(network, db);
@@ -242,6 +248,10 @@ export interface InsertEventRow {
   amount: string | null;
   token: string | null;
   created_amount: string | null;
+  start_time?: number | null;
+  duration?: number | null;
+  cliff_duration?: number | null;
+  vesting_kind?: string | null;
   raw_topics: string;
   raw_value: string;
 }
@@ -317,8 +327,9 @@ export function insertEventsBatch(events: InsertEventRow[], network?: NetworkNam
     const stmt = db.prepare(
       `INSERT OR IGNORE INTO schedule_events
         (id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
-         grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         grantor, beneficiary, amount, token, created_amount,
+         start_time, duration, cliff_duration, vesting_kind, raw_topics, raw_value)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     
     for (const row of eventRows) {
@@ -335,6 +346,10 @@ export function insertEventsBatch(events: InsertEventRow[], network?: NetworkNam
           row.amount,
           row.token,
           row.created_amount,
+          row.start_time ?? null,
+          row.duration ?? null,
+          row.cliff_duration ?? null,
+          row.vesting_kind ?? null,
           row.raw_topics,
           row.raw_value
         );
@@ -809,6 +824,261 @@ export function recordDailySnapshot(stats: AnalyticsStats): void {
       stats.total_schedules_created,
       stats.total_revoked
     );
+}
+
+// ── Materialized analytics snapshots ────────────────────────────────────
+//
+// Populated incrementally by analytics.ts after each processed ledger
+// batch. See indexer/schema.sql for the table shapes and the
+// `materialized_at` marker column that drives incremental pickup.
+
+export interface RawScheduleEventRow {
+  id: string;
+  event_type: string;
+  ledger: number;
+  ledger_closed_at: string;
+  schedule_id: number | null;
+  grantor: string | null;
+  beneficiary: string | null;
+  amount: string | null;
+  token: string | null;
+  created_amount: string | null;
+  start_time: number | null;
+  duration: number | null;
+  cliff_duration: number | null;
+  vesting_kind: string | null;
+  raw_value: string;
+}
+
+/**
+ * Fetches every schedule/claim/revoke event not yet folded into the
+ * snapshot tables. Ordering by ledger keeps replay-order processing
+ * deterministic, but is not relied upon for correctness — each affected
+ * (schedule, day) pair is recomputed from the full event history, not
+ * diffed, so out-of-order pickup is safe.
+ */
+export function getUnmaterializedEvents(network?: NetworkName, limit = 5000): RawScheduleEventRow[] {
+  return getDb(network)
+    .prepare(
+      `SELECT id, event_type, ledger, ledger_closed_at, schedule_id, grantor,
+              beneficiary, amount, token, created_amount, start_time, duration,
+              cliff_duration, vesting_kind, raw_value
+       FROM schedule_events
+       WHERE materialized_at IS NULL
+         AND event_type IN ('schedule_created', 'claimed', 'revoked')
+       ORDER BY ledger ASC
+       LIMIT ?`
+    )
+    .all(limit) as RawScheduleEventRow[];
+}
+
+export function markEventsMaterialized(ids: string[], network?: NetworkName): void {
+  if (ids.length === 0) return;
+  const db = getDb(network);
+  const now = Math.floor(Date.now() / 1000);
+  const stmt = db.prepare("UPDATE schedule_events SET materialized_at = ? WHERE id = ?");
+  const tx = db.transaction((rows: string[]) => {
+    for (const id of rows) stmt.run(now, id);
+  });
+  tx(ids);
+}
+
+/** Every schedule_events row for a given schedule, oldest first. */
+export function getEventsForSchedule(scheduleId: number, network?: NetworkName): RawScheduleEventRow[] {
+  return getDb(network)
+    .prepare(
+      `SELECT id, event_type, ledger, ledger_closed_at, schedule_id, grantor,
+              beneficiary, amount, token, created_amount, start_time, duration,
+              cliff_duration, vesting_kind, raw_value
+       FROM schedule_events
+       WHERE schedule_id = ?
+         AND event_type IN ('schedule_created', 'claimed', 'revoked')
+       ORDER BY ledger ASC`
+    )
+    .all(scheduleId) as RawScheduleEventRow[];
+}
+
+/** Distinct schedule ids that had activity on the given day (grantor-scoped, for grantor summaries). */
+export function getScheduleIdsForGrantor(grantorAddress: string, network?: NetworkName): number[] {
+  const rows = getDb(network)
+    .prepare(
+      `SELECT DISTINCT schedule_id FROM schedule_events
+       WHERE grantor = ? AND schedule_id IS NOT NULL`
+    )
+    .all(grantorAddress) as { schedule_id: number }[];
+  return rows.map((r) => r.schedule_id);
+}
+
+export interface ScheduleDailySnapshotRow {
+  schedule_id: number;
+  day: string;
+  total_vested_stroops: string;
+  total_claimed_stroops: string;
+  claimable_stroops: string;
+  locked_stroops: string;
+}
+
+export function upsertScheduleDailySnapshot(row: ScheduleDailySnapshotRow, network?: NetworkName): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO schedule_daily_snapshots
+        (schedule_id, day, total_vested_stroops, total_claimed_stroops, claimable_stroops, locked_stroops)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (schedule_id, day) DO UPDATE SET
+         total_vested_stroops = excluded.total_vested_stroops,
+         total_claimed_stroops = excluded.total_claimed_stroops,
+         claimable_stroops = excluded.claimable_stroops,
+         locked_stroops = excluded.locked_stroops`
+    )
+    .run(row.schedule_id, row.day, row.total_vested_stroops, row.total_claimed_stroops, row.claimable_stroops, row.locked_stroops);
+}
+
+export interface TokenDailyTvlRow {
+  token_address: string;
+  day: string;
+  total_locked_stroops: string;
+  active_schedule_count: number;
+}
+
+export function upsertTokenDailyTvl(row: TokenDailyTvlRow, network?: NetworkName): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO token_daily_tvl (token_address, day, total_locked_stroops, active_schedule_count)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (token_address, day) DO UPDATE SET
+         total_locked_stroops = excluded.total_locked_stroops,
+         active_schedule_count = excluded.active_schedule_count`
+    )
+    .run(row.token_address, row.day, row.total_locked_stroops, row.active_schedule_count);
+}
+
+export interface GrantorDailyStatsRow {
+  grantor_address: string;
+  day: string;
+  active_schedule_count: number;
+  total_distributed_stroops: string;
+}
+
+export function upsertGrantorDailyStats(row: GrantorDailyStatsRow, network?: NetworkName): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO grantor_daily_stats (grantor_address, day, active_schedule_count, total_distributed_stroops)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT (grantor_address, day) DO UPDATE SET
+         active_schedule_count = excluded.active_schedule_count,
+         total_distributed_stroops = excluded.total_distributed_stroops`
+    )
+    .run(row.grantor_address, row.day, row.active_schedule_count, row.total_distributed_stroops);
+}
+
+/** Every token that has at least one schedule_created event, for TVL re-aggregation. */
+export function getKnownTokens(network?: NetworkName): string[] {
+  const rows = getDb(network)
+    .prepare(
+      `SELECT DISTINCT token FROM schedule_events
+       WHERE event_type = 'schedule_created' AND token IS NOT NULL AND token != ''`
+    )
+    .all() as { token: string }[];
+  return rows.map((r) => r.token);
+}
+
+/** Schedule ids for a token, for token-scoped TVL re-aggregation. */
+export function getScheduleIdsForToken(token: string, network?: NetworkName): number[] {
+  const rows = getDb(network)
+    .prepare(
+      `SELECT DISTINCT schedule_id FROM schedule_events
+       WHERE event_type = 'schedule_created' AND token = ? AND schedule_id IS NOT NULL`
+    )
+    .all(token) as { schedule_id: number }[];
+  return rows.map((r) => r.schedule_id);
+}
+
+export function runInTransaction<T>(fn: () => T, network?: NetworkName): T {
+  const db = getDb(network);
+  return db.transaction(fn)();
+}
+
+/** Raw daily rows for a schedule in [from, to], no gap-filling — callers gap-fill in JS. */
+export function queryScheduleDailySnapshots(
+  scheduleId: number,
+  from: string,
+  to: string,
+  network?: NetworkName
+): ScheduleDailySnapshotRow[] {
+  return getDb(network)
+    .prepare(
+      `SELECT schedule_id, day, total_vested_stroops, total_claimed_stroops, claimable_stroops, locked_stroops
+       FROM schedule_daily_snapshots
+       WHERE schedule_id = ? AND day >= ? AND day <= ?
+       ORDER BY day ASC`
+    )
+    .all(scheduleId, from, to) as ScheduleDailySnapshotRow[];
+}
+
+/** Most recent snapshot row at or before `day`, used to seed gap-fill before the requested range. */
+export function getScheduleSnapshotOnOrBefore(
+  scheduleId: number,
+  day: string,
+  network?: NetworkName
+): ScheduleDailySnapshotRow | null {
+  const row = getDb(network)
+    .prepare(
+      `SELECT schedule_id, day, total_vested_stroops, total_claimed_stroops, claimable_stroops, locked_stroops
+       FROM schedule_daily_snapshots
+       WHERE schedule_id = ? AND day <= ?
+       ORDER BY day DESC LIMIT 1`
+    )
+    .get(scheduleId, day) as ScheduleDailySnapshotRow | undefined;
+  return row ?? null;
+}
+
+export function queryTokenDailyTvl(
+  token: string,
+  from: string,
+  to: string,
+  network?: NetworkName
+): TokenDailyTvlRow[] {
+  return getDb(network)
+    .prepare(
+      `SELECT token_address, day, total_locked_stroops, active_schedule_count
+       FROM token_daily_tvl
+       WHERE token_address = ? AND day >= ? AND day <= ?
+       ORDER BY day ASC`
+    )
+    .all(token, from, to) as TokenDailyTvlRow[];
+}
+
+export function getGrantorDailyStatsRange(
+  grantorAddress: string,
+  network?: NetworkName
+): GrantorDailyStatsRow[] {
+  return getDb(network)
+    .prepare(
+      `SELECT grantor_address, day, active_schedule_count, total_distributed_stroops
+       FROM grantor_daily_stats
+       WHERE grantor_address = ?
+       ORDER BY day ASC`
+    )
+    .all(grantorAddress) as GrantorDailyStatsRow[];
+}
+
+export function getAnalyticsWatermark(network: NetworkName): number {
+  const row = getDb(network)
+    .prepare("SELECT last_ledger FROM analytics_watermark WHERE network = ?")
+    .get(network) as { last_ledger: number } | undefined;
+  return row?.last_ledger ?? 0;
+}
+
+export function setAnalyticsWatermark(network: NetworkName, ledger: number): void {
+  getDb(network)
+    .prepare(
+      `INSERT INTO analytics_watermark (network, last_ledger, last_materialized_at)
+       VALUES (?, ?, unixepoch())
+       ON CONFLICT (network) DO UPDATE SET
+         last_ledger = excluded.last_ledger,
+         last_materialized_at = excluded.last_materialized_at`
+    )
+    .run(network, ledger);
 }
 
 // ── Notifications ──────────────────────────────────────────────────────────

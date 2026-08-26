@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { withLogging } from "@/lib/requestLogger";
 
 /**
  * GET /api/schedules/:address/history
@@ -22,7 +23,7 @@ function indexerUrlFor(network: string | null): string {
   return process.env.INDEXER_TESTNET_URL ?? INDEXER_URL;
 }
 
-export async function GET(
+export const GET = withLogging(async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ address: string }> }
 ): Promise<NextResponse> {
@@ -72,4 +73,4 @@ export async function GET(
       { status: 503 }
     );
   }
-}
+});

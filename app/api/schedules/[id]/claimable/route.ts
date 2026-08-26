@@ -1,11 +1,12 @@
 import { getClaimable } from "@/lib/stellar";
 import { getOrSetCache } from "@/lib/redisCache";
 import { NextRequest, NextResponse } from "next/server";
+import { withLogging } from "@/lib/requestLogger";
 
 // Short TTL read-through cache (#206) — see app/api/schedules/[id]/route.ts.
 const CACHE_TTL_SECONDS = 20;
 
-export async function GET(
+export const GET = withLogging(async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse> {
@@ -45,4 +46,4 @@ export async function GET(
       { status: 500 }
     );
   }
-}
+});

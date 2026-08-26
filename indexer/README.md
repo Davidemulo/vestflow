@@ -179,6 +179,55 @@ GET /stats/tvl?network=testnet
 
 ---
 
+## Analytics API
+
+Materialized daily snapshots, folded in incrementally by `analytics.ts`
+after each processed ledger batch (see `materialize()` in that file). These
+endpoints read only from `schedule_daily_snapshots`, `token_daily_tvl` and
+`grantor_daily_stats` — never from raw `schedule_events` — so they stay fast
+regardless of total event volume.
+
+### `GET /analytics/tvl`
+
+Daily TVL for a single token. Query params: `token` (required, asset
+contract address), `from`, `to` (ISO 8601, default: last 30 days),
+`cumulative` (`true` for a running total instead of the per-day balance),
+`network` (`testnet` | `mainnet`, default `testnet`). Responses are served
+from a 60s in-memory LRU cache (100 entries), invalidated for "today" only
+whenever a new ledger changes that day's numbers.
+
+```
+GET /analytics/tvl?token=CDLZ...&from=2026-07-01&to=2026-08-01&cumulative=true
+```
+
+```json
+{
+  "token": "CDLZ...",
+  "from": "2026-07-01",
+  "to": "2026-08-01",
+  "cumulative": true,
+  "decimals": 7,
+  "points": [
+    { "day": "2026-07-01", "total_locked_stroops": "7500000", "active_schedule_count": 3, "total_locked_display": "0.75" }
+  ],
+  "cached": false
+}
+```
+
+### `GET /analytics/schedules/:id/history`
+
+Daily `{ vested, claimed, claimable, locked }` for one schedule, gap-filled:
+a day with no activity repeats the last known values instead of a hole.
+Query params: `from`, `to` (default: last 30 days).
+
+### `GET /analytics/grantors/:address/summary`
+
+`{ total_schedules_created, total_distributed, active_schedules,
+revoked_schedules, avg_duration_days }` for every schedule the address has
+created.
+
+---
+
 ## Webhooks
 
 Every indexed event is fanned out to registered HTTP endpoints with signed
