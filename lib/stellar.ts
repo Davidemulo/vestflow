@@ -470,6 +470,14 @@ export async function revokeSchedule(publicKey: string, scheduleId: number): Pro
   return buildAndSend(publicKey, "revoke", [nativeToScVal(scheduleId, { type: "u64" })]);
 }
 
+export async function pauseSchedule(publicKey: string, scheduleId: number): Promise<string> {
+  return buildAndSend(publicKey, "pause_schedule", [nativeToScVal(scheduleId, { type: "u64" })]);
+}
+
+export async function resumeSchedule(publicKey: string, scheduleId: number): Promise<string> {
+  return buildAndSend(publicKey, "resume_schedule", [nativeToScVal(scheduleId, { type: "u64" })]);
+}
+
 export async function transferGrantor(
   publicKey: string,
   scheduleId: number,
@@ -588,7 +596,9 @@ export function vestingProgress(s: ScheduleData, now: number): number {
   }
   if (now < s.start_time) return 0;
   if (s.duration <= 0) return 100;
-  const elapsed = now - s.start_time;
+  const activePauseSeconds =
+    s.paused && s.paused_at > 0 ? Math.max(0, now - s.paused_at) : 0;
+  const elapsed = Math.max(0, now - s.start_time - s.paused_duration - activePauseSeconds);
   return Math.min(100, Math.round((elapsed / s.duration) * 100));
 }
 
@@ -629,6 +639,10 @@ export function parseContractError(e: Error): string {
   if (msg.includes("Insufficient balance")) return "Insufficient balance to complete this action.";
   if (msg.includes("Schedule has ended")) return "This vesting schedule has already ended.";
   if (msg.includes("Start time in the past")) return "The start time must be in the future.";
+  if (msg.includes("Schedule already paused")) return "This schedule is already paused.";
+  if (msg.includes("Schedule not paused")) return "This schedule is not currently paused.";
+  if (msg.includes("Cannot pause revoked schedule")) return "Revoked schedules cannot be paused.";
+  if (msg.includes("Cannot resume revoked schedule")) return "Revoked schedules cannot be resumed.";
   return msg;
 }
 

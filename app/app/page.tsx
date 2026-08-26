@@ -20,6 +20,7 @@ import {
   ScheduleData,
   vestingProgress,
   NATIVE_TOKEN,
+  NETWORK,
   stroopsToXlm,
 } from "@/lib/stellar";
 import { useWallet } from "@/lib/WalletContext";
@@ -42,6 +43,35 @@ interface DashboardStats {
   claimableNow: bigint;
   totalVested: bigint;
   activeSchedules: number;
+}
+
+interface IndexedEvent {
+  id: string;
+  event_type: string;
+  ledger: number;
+  ledger_closed_at: string;
+  grantor?: string | null;
+  beneficiary?: string | null;
+  amount?: string | null;
+  token?: string | null;
+}
+
+interface StreamTokenSummary {
+  token: string;
+  dripped: bigint;
+  received: bigint;
+}
+
+function tokenLabel(token: string): string {
+  if (token === NATIVE_TOKEN) return "XLM";
+  return `${token.slice(0, 6)}...${token.slice(-4)}`;
+}
+
+function formatAmount(value: bigint): string {
+  return Number(stroopsToXlm(value)).toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 4,
+  });
 }
 
 // ── Animated stats bar (#94) ──────────────────────────────────────────────────
@@ -127,6 +157,160 @@ function AnimatedStats({ stats }: { stats: DashboardStats }) {
   );
 }
 
+function StreamsAnalyticsSummary({ publicKey, refreshKey }: { publicKey: string; refreshKey: number }) {
+  const [summaries, setSummaries] = useState<StreamTokenSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(`/api/events?address=${publicKey}&network=${NETWORK}&limit=200`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("events unavailable")))
+      .then((data) => {
+        if (cancelled) return;
+        const byToken = new Map<string, StreamTokenSummary>();
+        for (const event of (data.events ?? []) as IndexedEvent[]) {
+          if (event.event_type !== "given" && event.event_type !== "collected") continue;
+          const token = event.token ?? NATIVE_TOKEN;
+          const amount = BigInt(event.amount ?? "0");
+          const current = byToken.get(token) ?? { token, dripped: 0n, received: 0n };
+          if (event.event_type === "given") {
+            if (event.grantor === publicKey) current.dripped += amount;
+            if (event.beneficiary === publicKey) current.received += amount;
+          }
+          if (event.event_type === "collected" && event.beneficiary === publicKey) {
+            current.received += amount;
+          }
+          byToken.set(token, current);
+        }
+        setSummaries([...byToken.values()].sort((a, b) => tokenLabel(a.token).localeCompare(tokenLabel(b.token))));
+      })
+      .catch(() => {
+        if (!cancelled) setSummaries([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [publicKey, refreshKey]);
+
+  if (loading) {
+    return (
+      <div className="card p-4 mb-6">
+        <p className="text-sm text-zinc-400">Loading stream analytics...</p>
+      </div>
+    );
+  }
+
+  if (summaries.length === 0) return null;
+
+  return (
+    <div className="card p-5 mb-6">
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-lg font-semibold">Streams Analytics</h2>
+          <p className="text-sm text-zinc-500">All-time dripped and received totals by token</p>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {summaries.map((summary) => {
+          const net = summary.received - summary.dripped;
+          const netPositive = net >= 0n;
+          return (
+            <div key={summary.token} className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+              <p className="text-xs text-zinc-500 mb-3 font-mono">{tokenLabel(summary.token)}</p>
+              <div className="space-y-2 text-sm">
+                <div className="flex justify-between gap-3">
+                  <span className="text-zinc-500">Dripped</span>
+                  <span className="text-red-300 tabular-nums">{formatAmount(summary.dripped)}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-zinc-500">Received</span>
+                  <span className="text-emerald-300 tabular-nums">{formatAmount(summary.received)}</span>
+                </div>
+                <div className="flex justify-between gap-3 border-t border-white/10 pt-2">
+                  <span className="text-zinc-400">Net</span>
+                  <span className={`tabular-nums font-semibold ${netPositive ? "text-emerald-300" : "text-red-300"}`}>
+                    {netPositive ? "+" : "-"}{formatAmount(netPositive ? net : -net)}
+                  </span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RecentGives({ publicKey, refreshKey }: { publicKey: string; refreshKey: number }) {
+  const [gives, setGives] = useState<IndexedEvent[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/events?address=${publicKey}&event_type=given&network=${NETWORK}&limit=50`)
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error("gives unavailable")))
+      .then((data) => {
+        if (cancelled) return;
+        const sorted = ((data.events ?? []) as IndexedEvent[])
+          .filter((event) => event.event_type === "given")
+          .sort((a, b) => b.ledger - a.ledger)
+          .slice(0, 5);
+        setGives(sorted);
+      })
+      .catch(() => {
+        if (!cancelled) setGives([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [publicKey, refreshKey]);
+
+  if (gives.length === 0) return null;
+
+  return (
+    <div className="card p-5 mb-6">
+      <div className="flex items-center justify-between gap-3 mb-4">
+        <div>
+          <h2 className="text-lg font-semibold">Recent Gives</h2>
+          <p className="text-sm text-zinc-500">Latest one-time gives sent or received</p>
+        </div>
+        <Link href="/app/history" className="text-sm text-violet-300 hover:text-violet-200 transition-colors">
+          See all
+        </Link>
+      </div>
+      <div className="divide-y divide-white/10">
+        {gives.map((give) => {
+          const sent = give.grantor === publicKey;
+          const counterparty = sent ? give.beneficiary : give.grantor;
+          return (
+            <div key={give.id} className="flex items-center justify-between gap-3 py-3 text-sm">
+              <div className="min-w-0">
+                <p className={`font-medium ${sent ? "text-red-300" : "text-emerald-300"}`}>
+                  {sent ? "Sent" : "Received"} {formatAmount(BigInt(give.amount ?? "0"))} {tokenLabel(give.token ?? NATIVE_TOKEN)}
+                </p>
+                {counterparty && (
+                  <Link
+                    href={`/app/profile/${encodeURIComponent(counterparty)}`}
+                    className="font-mono text-xs text-zinc-500 hover:text-violet-300 transition-colors"
+                  >
+                    {counterparty.slice(0, 10)}...{counterparty.slice(-6)}
+                  </Link>
+                )}
+              </div>
+              <time className="text-xs text-zinc-500 whitespace-nowrap" dateTime={give.ledger_closed_at}>
+                {new Date(give.ledger_closed_at).toLocaleDateString()}
+              </time>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function RpcErrorBanner({ onDismiss }: { onDismiss: () => void }) {
   return (
     <div
@@ -169,6 +353,7 @@ export default function DashboardPage() {
   const [sortBy, setSortBy] = useState<SortKey>("newest");
   const [page, setPage] = useState(1);
   const [query, setQuery] = useState("");
+  const [refreshKey, setRefreshKey] = useState(0);
 
   const load = async () => {
     setLoading(true);
@@ -234,6 +419,7 @@ export default function DashboardPage() {
       }
     } finally {
       setLoading(false);
+      setRefreshKey((value) => value + 1);
     }
   };
 
@@ -395,6 +581,8 @@ export default function DashboardPage() {
 
         {/* Summary stats — animated count-up (#270) */}
         {publicKey && stats && <AnimatedStats stats={stats} />}
+        {publicKey && <StreamsAnalyticsSummary publicKey={publicKey} refreshKey={refreshKey} />}
+        {publicKey && <RecentGives publicKey={publicKey} refreshKey={refreshKey} />}
 
         {/* Recently viewed schedules (#416) */}
         {publicKey && <RecentlyViewedSchedules schedules={recentSchedules} />}
