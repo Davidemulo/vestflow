@@ -8,6 +8,7 @@ import {
 } from "@/lib/stellar";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
 import { NextRequest, NextResponse } from "next/server";
+import { withLogging } from "@/lib/requestLogger";
 
 const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
@@ -40,7 +41,7 @@ function vestedAmount(schedule: {
   }
 }
 
-export async function GET(request: NextRequest): Promise<NextResponse> {
+export const GET = withLogging(async function GET(request: NextRequest): Promise<NextResponse> {
   const rateLimitResponse = await rateLimiter(request);
   if (rateLimitResponse) return rateLimitResponse;
 
@@ -112,4 +113,4 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     console.error("Error searching schedules:", error);
     return NextResponse.json({ error: "Failed to search schedules" }, { status: 500 });
   }
-}
+});

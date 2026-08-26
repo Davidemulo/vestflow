@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
+import { withLogging } from "@/lib/requestLogger";
 
 const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
@@ -45,7 +46,7 @@ const ALLOWED_PARAMS = new Set([
   "network",
 ]);
 
-export async function GET(req: NextRequest): Promise<NextResponse> {
+export const GET = withLogging(async function GET(req: NextRequest): Promise<NextResponse> {
   const rateLimitResponse = await rateLimiter(req);
   if (rateLimitResponse) {
     return rateLimitResponse;
@@ -113,4 +114,4 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
       { status: 503 }
     );
   }
-}
+});

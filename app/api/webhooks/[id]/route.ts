@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getEndpoint, removeEndpoint } from "@/lib/webhooks";
+import { withLogging } from "@/lib/requestLogger";
 
 /**
  * GET /api/webhooks/:id — retrieve a single webhook endpoint (without secret).
  */
-export async function GET(
+export const GET = withLogging(async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
@@ -19,12 +20,12 @@ export async function GET(
     events: endpoint.events,
     createdAt: endpoint.createdAt,
   });
-}
+});
 
 /**
  * DELETE /api/webhooks/:id — unregister a webhook endpoint.
  */
-export async function DELETE(
+export const DELETE = withLogging(async function DELETE(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ): Promise<NextResponse> {
@@ -34,4 +35,4 @@ export async function DELETE(
     return NextResponse.json({ error: "Webhook not found" }, { status: 404 });
   }
   return new NextResponse(null, { status: 204 });
-}
+});
