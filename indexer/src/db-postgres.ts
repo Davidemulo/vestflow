@@ -172,6 +172,66 @@ export async function insertRevokeEvent(event: InsertRevokeEventRow): Promise<bo
   return result.rowCount !== null && result.rowCount > 0;
 }
 
+export interface InsertGivenEventRow {
+  id: string;
+  sender: string;
+  receiver: string;
+  token: string;
+  amount_stroops: string;
+  ledger: number;
+  timestamp: string;
+}
+
+export async function insertGivenEvent(event: InsertGivenEventRow): Promise<boolean> {
+  const result = await getPool().query(
+    `INSERT INTO gives (id, sender, receiver, token, amount_stroops, ledger, timestamp)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (id) DO NOTHING`,
+    [
+      event.id,
+      event.sender,
+      event.receiver,
+      event.token,
+      event.amount_stroops,
+      event.ledger,
+      event.timestamp,
+    ]
+  );
+  return result.rowCount !== null && result.rowCount > 0;
+}
+
+export async function upsertCurrentStream(row: {
+  account: string;
+  token: string;
+  receivers_json: unknown;
+  updated_at: string;
+}): Promise<void> {
+  await getPool().query(
+    `INSERT INTO current_streams (account, token, receivers_json, updated_at)
+     VALUES ($1, $2, $3::jsonb, $4)
+     ON CONFLICT (account, token) DO UPDATE SET
+       receivers_json = EXCLUDED.receivers_json,
+       updated_at = EXCLUDED.updated_at`,
+    [row.account, row.token, JSON.stringify(row.receivers_json), row.updated_at]
+  );
+}
+
+export async function upsertCollectedTotal(row: {
+  account: string;
+  token: string;
+  amount_stroops: string;
+  updated_at: string;
+}): Promise<void> {
+  await getPool().query(
+    `INSERT INTO collected_totals (account, token, total_collected_stroops, updated_at)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (account, token) DO UPDATE SET
+       total_collected_stroops = collected_totals.total_collected_stroops + EXCLUDED.total_collected_stroops,
+       updated_at = EXCLUDED.updated_at`,
+    [row.account, row.token, row.amount_stroops, row.updated_at]
+  );
+}
+
 export async function getScheduleById(scheduleId: number): Promise<any | null> {
   const result = await getPool().query(
     "SELECT * FROM vesting_schedules WHERE schedule_id = $1",
@@ -363,4 +423,273 @@ export async function setAnalyticsWatermark(network: string, ledger: number): Pr
        last_materialized_at = EXCLUDED.last_materialized_at`,
     [network, ledger]
   );
+}
+
+export interface PgRawScheduleEventRow {
+  id: string;
+  event_type: "schedule_created" | "claimed" | "revoked";
+  ledger: number;
+  ledger_closed_at: string;
+  schedule_id: number;
+  grantor: string | null;
+  beneficiary: string | null;
+  token: string | null;
+  amount: string | null;
+  created_amount: string | null;
+  start_time: number | null;
+  duration: number | null;
+  cliff_duration: number | null;
+  vesting_kind: string | null;
+  raw_value: string;
+}
+
+export async function getPostgresEventsAfterWatermark(
+  lastLedger: number
+): Promise<PgRawScheduleEventRow[]> {
+  const result = await getPool().query(
+    `SELECT ('schedule_created:' || schedule_id::text) AS id,
+            'schedule_created' AS event_type, ledger_created AS ledger,
+            ledger_closed_at::text, schedule_id, grantor, beneficiary, token,
+            NULL::text AS amount, total_amount::text AS created_amount,
+            start_time, duration, cliff_duration, vesting_kind, '{}'::text AS raw_value
+       FROM vesting_schedules
+       WHERE ledger_created > $1
+     UNION ALL
+     SELECT c.id, 'claimed' AS event_type, c.ledger, c.ledger_closed_at::text,
+            c.schedule_id, v.grantor, c.beneficiary, v.token,
+            c.amount::text AS amount, NULL::text AS created_amount,
+            NULL::bigint AS start_time, NULL::bigint AS duration,
+            NULL::bigint AS cliff_duration, NULL::text AS vesting_kind, c.raw_value
+       FROM claim_events c
+       JOIN vesting_schedules v ON v.schedule_id = c.schedule_id
+       WHERE c.ledger > $1
+     UNION ALL
+     SELECT r.id, 'revoked' AS event_type, r.ledger, r.ledger_closed_at::text,
+            r.schedule_id, r.grantor, v.beneficiary, v.token,
+            r.revoked_amount::text AS amount, NULL::text AS created_amount,
+            NULL::bigint AS start_time, NULL::bigint AS duration,
+            NULL::bigint AS cliff_duration, NULL::text AS vesting_kind, r.raw_value
+       FROM revoke_events r
+       JOIN vesting_schedules v ON v.schedule_id = r.schedule_id
+       WHERE r.ledger > $1
+     ORDER BY ledger ASC, id ASC`,
+    [lastLedger]
+  );
+  return result.rows;
+}
+
+export async function getPostgresEventsForSchedule(
+  scheduleId: number
+): Promise<PgRawScheduleEventRow[]> {
+  const result = await getPool().query(
+    `SELECT ('schedule_created:' || schedule_id::text) AS id,
+            'schedule_created' AS event_type, ledger_created AS ledger,
+            ledger_closed_at::text, schedule_id, grantor, beneficiary, token,
+            NULL::text AS amount, total_amount::text AS created_amount,
+            start_time, duration, cliff_duration, vesting_kind, '{}'::text AS raw_value
+       FROM vesting_schedules
+       WHERE schedule_id = $1
+     UNION ALL
+     SELECT c.id, 'claimed' AS event_type, c.ledger, c.ledger_closed_at::text,
+            c.schedule_id, v.grantor, c.beneficiary, v.token,
+            c.amount::text AS amount, NULL::text AS created_amount,
+            NULL::bigint AS start_time, NULL::bigint AS duration,
+            NULL::bigint AS cliff_duration, NULL::text AS vesting_kind, c.raw_value
+       FROM claim_events c
+       JOIN vesting_schedules v ON v.schedule_id = c.schedule_id
+       WHERE c.schedule_id = $1
+     UNION ALL
+     SELECT r.id, 'revoked' AS event_type, r.ledger, r.ledger_closed_at::text,
+            r.schedule_id, r.grantor, v.beneficiary, v.token,
+            r.revoked_amount::text AS amount, NULL::text AS created_amount,
+            NULL::bigint AS start_time, NULL::bigint AS duration,
+            NULL::bigint AS cliff_duration, NULL::text AS vesting_kind, r.raw_value
+       FROM revoke_events r
+       JOIN vesting_schedules v ON v.schedule_id = r.schedule_id
+       WHERE r.schedule_id = $1
+     ORDER BY ledger ASC, id ASC`,
+    [scheduleId]
+  );
+  return result.rows;
+}
+
+const SECONDS_PER_DAY = 86_400;
+
+function pgDayFromIso(iso: string): string {
+  return iso.slice(0, 10);
+}
+
+function pgEndOfDaySeconds(day: string): number {
+  return Math.floor(Date.parse(`${day}T00:00:00.000Z`) / 1000) + SECONDS_PER_DAY - 1;
+}
+
+function pgEnumerateDays(from: string, to: string): string[] {
+  const days: string[] = [];
+  let cursor = Date.parse(`${from}T00:00:00.000Z`);
+  const end = Date.parse(`${to}T00:00:00.000Z`);
+  while (cursor <= end) {
+    days.push(new Date(cursor).toISOString().slice(0, 10));
+    cursor += SECONDS_PER_DAY * 1000;
+  }
+  return days;
+}
+
+function pgVestedAt(row: PgRawScheduleEventRow, atSeconds: number): bigint | null {
+  const total = BigInt(row.created_amount ?? "0");
+  if (row.start_time == null || row.duration == null) return null;
+  if (atSeconds <= row.start_time) return 0n;
+  if (row.duration <= 0) return total;
+  const elapsed = atSeconds - row.start_time;
+  if (elapsed >= row.duration) return total;
+
+  const kind = (row.vesting_kind ?? "Linear").replace(/"/g, "");
+  if (kind === "Cliff") {
+    return elapsed >= (row.cliff_duration ?? 0) ? total : 0n;
+  }
+  if (kind === "LinearWithCliff") {
+    const cliff = row.cliff_duration ?? 0;
+    if (elapsed < cliff) return 0n;
+    const linearDuration = BigInt(row.duration - cliff);
+    const linearElapsed = BigInt(elapsed - cliff);
+    if (linearDuration <= 0n) return total;
+    return (total * linearElapsed) / linearDuration;
+  }
+  if (kind === "Linear") {
+    return (total * BigInt(elapsed)) / BigInt(row.duration);
+  }
+  return null;
+}
+
+export interface PostgresMaterializeResult {
+  events_processed: number;
+  schedules_affected: number;
+  tokens_affected: number;
+  grantors_affected: number;
+  watermark_ledger: number;
+}
+
+export async function materializePostgresAnalytics(network: string): Promise<PostgresMaterializeResult> {
+  const lastLedger = await getAnalyticsWatermark(network);
+  const pending = await getPostgresEventsAfterWatermark(lastLedger);
+  if (pending.length === 0) {
+    return {
+      events_processed: 0,
+      schedules_affected: 0,
+      tokens_affected: 0,
+      grantors_affected: 0,
+      watermark_ledger: lastLedger,
+    };
+  }
+
+  const affected = new Map<number, Set<string>>();
+  let watermark = lastLedger;
+  for (const row of pending) {
+    watermark = Math.max(watermark, row.ledger);
+    const days = affected.get(row.schedule_id) ?? new Set<string>();
+    days.add(pgDayFromIso(row.ledger_closed_at));
+    affected.set(row.schedule_id, days);
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const affectedTokens = new Set<string>();
+  const affectedGrantors = new Set<string>();
+  const client = await getPool().connect();
+
+  try {
+    await client.query("BEGIN");
+    for (const [scheduleId, days] of affected) {
+      const history = await getPostgresEventsForSchedule(scheduleId);
+      const created = history.find((row) => row.event_type === "schedule_created");
+      if (!created) continue;
+      if (created.token) affectedTokens.add(created.token);
+      if (created.grantor) affectedGrantors.add(created.grantor);
+
+      for (const day of pgEnumerateDays([...days].sort()[0], today)) {
+        const claimed = history
+          .filter((row) => row.event_type === "claimed" && pgDayFromIso(row.ledger_closed_at) <= day)
+          .reduce((sum, row) => sum + BigInt(row.amount ?? "0"), 0n);
+        const revoked = history.find((row) => row.event_type === "revoked" && pgDayFromIso(row.ledger_closed_at) <= day);
+        const total = BigInt(created.created_amount ?? "0");
+        let revokedUnvested = 0n;
+        if (revoked) {
+          try {
+            const decoded = JSON.parse(revoked.raw_value);
+            const values = Array.isArray(decoded) ? decoded : Object.values(decoded ?? {});
+            revokedUnvested = BigInt(String(values[1] ?? "0"));
+          } catch {
+            revokedUnvested = BigInt(revoked.amount ?? "0");
+          }
+        }
+        let vested = revoked ? total - revokedUnvested : (pgVestedAt(created, pgEndOfDaySeconds(day)) ?? claimed);
+        if (vested < claimed) vested = claimed;
+        if (vested > total) vested = total;
+        const claimable = vested > claimed ? vested - claimed : 0n;
+        const locked = total > vested + revokedUnvested ? total - vested - revokedUnvested : 0n;
+        await client.query(
+          `INSERT INTO schedule_daily_snapshots
+            (schedule_id, day, total_vested_stroops, total_claimed_stroops, claimable_stroops, locked_stroops)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (schedule_id, day) DO UPDATE SET
+             total_vested_stroops = EXCLUDED.total_vested_stroops,
+             total_claimed_stroops = EXCLUDED.total_claimed_stroops,
+             claimable_stroops = EXCLUDED.claimable_stroops,
+             locked_stroops = EXCLUDED.locked_stroops`,
+          [scheduleId, day, vested.toString(), claimed.toString(), claimable.toString(), locked.toString()]
+        );
+      }
+    }
+
+    for (const token of affectedTokens) {
+      await client.query(
+        `INSERT INTO token_daily_tvl (token_address, day, total_locked_stroops, active_schedule_count)
+         SELECT $1, $2, COALESCE(SUM(locked_stroops), 0), COUNT(*) FILTER (WHERE locked_stroops > 0)
+         FROM schedule_daily_snapshots s
+         JOIN vesting_schedules v ON v.schedule_id = s.schedule_id
+         WHERE v.token = $1 AND s.day = $2
+         ON CONFLICT (token_address, day) DO UPDATE SET
+           total_locked_stroops = EXCLUDED.total_locked_stroops,
+           active_schedule_count = EXCLUDED.active_schedule_count`,
+        [token, today]
+      );
+    }
+
+    for (const grantor of affectedGrantors) {
+      await client.query(
+        `INSERT INTO grantor_daily_stats (grantor_address, day, active_schedule_count, total_distributed_stroops)
+         SELECT $1, $2,
+                COUNT(*) FILTER (WHERE s.locked_stroops > 0),
+                COALESCE(SUM(s.total_claimed_stroops), 0)
+         FROM vesting_schedules v
+         LEFT JOIN schedule_daily_snapshots s ON s.schedule_id = v.schedule_id AND s.day = $2
+         WHERE v.grantor = $1
+         ON CONFLICT (grantor_address, day) DO UPDATE SET
+           active_schedule_count = EXCLUDED.active_schedule_count,
+           total_distributed_stroops = EXCLUDED.total_distributed_stroops`,
+        [grantor, today]
+      );
+    }
+
+    await client.query(
+      `INSERT INTO analytics_watermark (network, last_ledger, last_materialized_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (network) DO UPDATE SET
+         last_ledger = EXCLUDED.last_ledger,
+         last_materialized_at = EXCLUDED.last_materialized_at`,
+      [network, watermark]
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  return {
+    events_processed: pending.length,
+    schedules_affected: affected.size,
+    tokens_affected: affectedTokens.size,
+    grantors_affected: affectedGrantors.size,
+    watermark_ledger: watermark,
+  };
 }

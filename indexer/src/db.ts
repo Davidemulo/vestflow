@@ -57,7 +57,7 @@ function migrateEventTypeCheck(db: Database.Database): void {
       `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'schedule_events'`
     )
     .get() as { sql: string } | undefined;
-  if (!row?.sql || row.sql.includes("proposal_created")) {
+  if (!row?.sql || row.sql.includes("stream_set")) {
     return;
   }
 
@@ -74,6 +74,9 @@ function migrateEventTypeCheck(db: Database.Database): void {
           'proposal_acknowledged',
           'proposal_activated',
           'proposal_expired',
+          'stream_set',
+          'given',
+          'collected',
           'unknown'
         )),
         ledger INTEGER NOT NULL,
@@ -85,6 +88,11 @@ function migrateEventTypeCheck(db: Database.Database): void {
         amount TEXT,
         token TEXT,
         created_amount TEXT,
+        start_time INTEGER,
+        duration INTEGER,
+        cliff_duration INTEGER,
+        vesting_kind TEXT,
+        materialized_at INTEGER,
         raw_topics TEXT NOT NULL,
         raw_value TEXT NOT NULL,
         created_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -93,11 +101,13 @@ function migrateEventTypeCheck(db: Database.Database): void {
     db.exec(`
       INSERT INTO schedule_events_new (
         id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
-        grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value, created_at
+        grantor, beneficiary, amount, token, created_amount, start_time, duration,
+        cliff_duration, vesting_kind, materialized_at, raw_topics, raw_value, created_at
       )
       SELECT
         id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
-        grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value, created_at
+        grantor, beneficiary, amount, token, created_amount, start_time, duration,
+        cliff_duration, vesting_kind, materialized_at, raw_topics, raw_value, created_at
       FROM schedule_events;
     `);
     db.exec("DROP TABLE schedule_events");
@@ -109,6 +119,7 @@ function migrateEventTypeCheck(db: Database.Database): void {
     db.exec("CREATE INDEX IF NOT EXISTS idx_event_type ON schedule_events (event_type)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_ledger ON schedule_events (ledger)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
+    db.exec("CREATE INDEX IF NOT EXISTS idx_materialized_at ON schedule_events (materialized_at)");
     db.exec("COMMIT");
   } catch (err) {
     db.exec("ROLLBACK");
@@ -212,6 +223,35 @@ export function getDb(network = parseNetwork(undefined)): Database.Database {
     db.exec("CREATE INDEX IF NOT EXISTS idx_token ON schedule_events (token)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_proposal_id ON schedule_events (proposal_id)");
     db.exec("CREATE INDEX IF NOT EXISTS idx_materialized_at ON schedule_events (materialized_at)");
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS current_streams (
+        account TEXT NOT NULL,
+        token TEXT NOT NULL,
+        receivers_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (account, token)
+      );
+      CREATE TABLE IF NOT EXISTS gives (
+        id TEXT PRIMARY KEY,
+        sender TEXT NOT NULL,
+        receiver TEXT NOT NULL,
+        token TEXT NOT NULL,
+        amount_stroops TEXT NOT NULL,
+        ledger INTEGER NOT NULL,
+        timestamp INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_gives_sender_timestamp
+        ON gives (sender, timestamp DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS idx_gives_receiver_timestamp
+        ON gives (receiver, timestamp DESC, id DESC);
+      CREATE TABLE IF NOT EXISTS collected_totals (
+        account TEXT NOT NULL,
+        token TEXT NOT NULL,
+        total_collected_stroops TEXT NOT NULL DEFAULT '0',
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (account, token)
+      );
+    `);
     migrateEventTypeCheck(db);
     ensureEventDedupIndex(db);
     dbs.set(network, db);
@@ -256,6 +296,49 @@ export interface InsertEventRow {
   raw_value: string;
 }
 
+function eventTimestamp(row: InsertEventRow): number {
+  const parsed = Date.parse(row.ledger_closed_at);
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : Math.floor(Date.now() / 1000);
+}
+
+function applyEventProjection(db: Database.Database, row: InsertEventRow): void {
+  const timestamp = eventTimestamp(row);
+
+  if (row.event_type === "stream_set" && row.grantor && row.token) {
+    db.prepare(
+      `INSERT INTO current_streams (account, token, receivers_json, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(account, token) DO UPDATE SET
+         receivers_json = excluded.receivers_json,
+         updated_at = excluded.updated_at`
+    ).run(row.grantor, row.token, row.raw_value, timestamp);
+    return;
+  }
+
+  if (row.event_type === "given" && row.grantor && row.beneficiary && row.token && row.amount) {
+    db.prepare(
+      `INSERT OR IGNORE INTO gives
+        (id, sender, receiver, token, amount_stroops, ledger, timestamp)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(row.id, row.grantor, row.beneficiary, row.token, row.amount, row.ledger, timestamp);
+    return;
+  }
+
+  if (row.event_type === "collected" && row.beneficiary && row.token && row.amount) {
+    const existing = db.prepare(
+      "SELECT total_collected_stroops FROM collected_totals WHERE account = ? AND token = ?"
+    ).get(row.beneficiary, row.token) as { total_collected_stroops: string } | undefined;
+    const nextTotal = (BigInt(existing?.total_collected_stroops ?? "0") + BigInt(row.amount)).toString();
+    db.prepare(
+      `INSERT INTO collected_totals (account, token, total_collected_stroops, updated_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(account, token) DO UPDATE SET
+         total_collected_stroops = excluded.total_collected_stroops,
+         updated_at = excluded.updated_at`
+    ).run(row.beneficiary, row.token, nextTotal, timestamp);
+  }
+}
+
 /**
  * Inserts an event row with enhanced idempotency.
  * Returns true if a new row was written, false if it already existed.
@@ -276,8 +359,9 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
       .prepare(
         `INSERT OR IGNORE INTO schedule_events
           (id, event_type, ledger, ledger_closed_at, schedule_id, proposal_id,
-           grantor, beneficiary, amount, token, created_amount, raw_topics, raw_value)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+           grantor, beneficiary, amount, token, created_amount,
+           start_time, duration, cliff_duration, vesting_kind, raw_topics, raw_value)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         row.id,
@@ -291,11 +375,19 @@ export function insertEvent(row: InsertEventRow, network?: NetworkName): boolean
         row.amount,
         row.token,
         row.created_amount,
+        row.start_time ?? null,
+        row.duration ?? null,
+        row.cliff_duration ?? null,
+        row.vesting_kind ?? null,
         row.raw_topics,
         row.raw_value
       );
     
-    return result.changes > 0;
+    if (result.changes > 0) {
+      applyEventProjection(db, row);
+      return true;
+    }
+    return false;
   } catch (error) {
     // Handle unique constraint violations (from the dedup index)
     if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) {
@@ -355,6 +447,7 @@ export function insertEventsBatch(events: InsertEventRow[], network?: NetworkNam
         );
         
         if (result.changes > 0) {
+          applyEventProjection(db, row);
           insertedCount++;
         }
       } catch (error) {
@@ -838,6 +931,55 @@ export function getDripsStreamingTvl(token: string, network?: NetworkName): stri
     "SELECT balance FROM drips_streaming_balances WHERE token = ?"
   ).all(token) as { balance: string }[];
   return rows.reduce((sum, row) => sum + BigInt(row.balance), 0n).toString();
+}
+
+export function getCurrentStream(account: string, token: string, network?: NetworkName): {
+  account: string;
+  token: string;
+  receivers_json: string;
+  updated_at: number;
+} | null {
+  const row = getDb(network).prepare(
+    "SELECT account, token, receivers_json, updated_at FROM current_streams WHERE account = ? AND token = ?"
+  ).get(account, token) as {
+    account: string;
+    token: string;
+    receivers_json: string;
+    updated_at: number;
+  } | undefined;
+  return row ?? null;
+}
+
+export function queryGivesForAccount(account: string, network?: NetworkName): Array<{
+  id: string;
+  sender: string;
+  receiver: string;
+  token: string;
+  amount_stroops: string;
+  ledger: number;
+  timestamp: number;
+}> {
+  return getDb(network).prepare(
+    `SELECT id, sender, receiver, token, amount_stroops, ledger, timestamp
+     FROM gives
+     WHERE sender = ? OR receiver = ?
+     ORDER BY timestamp DESC, id DESC`
+  ).all(account, account) as Array<{
+    id: string;
+    sender: string;
+    receiver: string;
+    token: string;
+    amount_stroops: string;
+    ledger: number;
+    timestamp: number;
+  }>;
+}
+
+export function getCollectedTotal(account: string, token: string, network?: NetworkName): string {
+  const row = getDb(network).prepare(
+    "SELECT total_collected_stroops FROM collected_totals WHERE account = ? AND token = ?"
+  ).get(account, token) as { total_collected_stroops: string } | undefined;
+  return row?.total_collected_stroops ?? "0";
 }
 
 /**
