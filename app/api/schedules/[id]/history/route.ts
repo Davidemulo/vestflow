@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSchedule, NETWORK } from "@/lib/stellar";
 import { createIpBasedRateLimiter } from "@/lib/rateLimit";
+import { withLogging } from "@/lib/requestLogger";
 
 const rateLimiter = createIpBasedRateLimiter(60000, 30);
 
@@ -34,7 +35,7 @@ function normalizeEventType(rawType: string): "created" | "claimed" | "revoked" 
   return "unknown";
 }
 
-export async function GET(
+export const GET = withLogging(async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ): Promise<NextResponse> {
@@ -194,4 +195,4 @@ export async function GET(
       { status: 500 }
     );
   }
-}
+});

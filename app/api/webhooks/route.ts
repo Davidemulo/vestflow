@@ -4,6 +4,7 @@ import {
   listEndpoints,
   WebhookEventType,
 } from "@/lib/webhooks";
+import { withLogging } from "@/lib/requestLogger";
 
 const ALLOWED_EVENTS = new Set<WebhookEventType>([
   "schedule.claimed",
@@ -14,7 +15,7 @@ const ALLOWED_EVENTS = new Set<WebhookEventType>([
 /**
  * GET /api/webhooks — list all registered webhook endpoints.
  */
-export async function GET(): Promise<NextResponse> {
+export const GET = withLogging(async function GET(): Promise<NextResponse> {
   const endpoints = listEndpoints().map((ep) => ({
     id: ep.id,
     url: ep.url,
@@ -23,7 +24,7 @@ export async function GET(): Promise<NextResponse> {
     // Never expose the signing secret in list responses
   }));
   return NextResponse.json({ endpoints });
-}
+});
 
 /**
  * POST /api/webhooks — register a new webhook endpoint.
@@ -36,7 +37,7 @@ export async function GET(): Promise<NextResponse> {
  * Response includes the generated `secret` — store it securely, it is not
  * returned again.
  */
-export async function POST(req: NextRequest): Promise<NextResponse> {
+export const POST = withLogging(async function POST(req: NextRequest): Promise<NextResponse> {
   let body: unknown;
   try {
     body = await req.json();
@@ -93,4 +94,4 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     },
     { status: 201 },
   );
-}
+});

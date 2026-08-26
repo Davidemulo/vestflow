@@ -15,7 +15,16 @@
 
 import http from "http";
 import { URL } from "url";
-import { getCheckpoint, getTvlStats, queryEvents, queryHistory } from "./db";
+import {
+  getCheckpoint,
+  getDripsStreamingTvl,
+  getTvlStats,
+  queryDripsListMembers,
+  queryDripsLists,
+  queryDripsStreams,
+  queryEvents,
+  queryHistory,
+} from "./db";
 import type { EventQueryParams } from "./types";
 import { routeWebhookRequest } from "./webhook-api";
 import { getTvlSeries, getScheduleHistory, getGrantorSummary } from "./analytics";
@@ -50,6 +59,65 @@ function numParam(
 
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function limitParam(params: URLSearchParams): number | null | undefined {
+  const raw = params.get("limit");
+  if (raw == null) return undefined;
+  const value = Number(raw);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function networkParam(params: URLSearchParams): "mainnet" | "testnet" | null {
+  const network = params.get("network") ?? "testnet";
+  return network === "mainnet" || network === "testnet" ? network : null;
+}
+
+const STELLAR_ADDRESS = /^G[A-Z2-7]{55}$/;
+
+function handleLists(res: http.ServerResponse, searchParams: URLSearchParams): void {
+  const limit = limitParam(searchParams);
+  const network = networkParam(searchParams);
+  if (limit === null) return json(res, 400, { error: "limit must be a positive integer" });
+  if (!network) return json(res, 400, { error: "network must be mainnet or testnet" });
+  const page = queryDripsLists({ owner: searchParams.get("owner") ?? undefined, limit, cursor: searchParams.get("cursor") ?? undefined, network });
+  if (!page) return json(res, 400, { error: "cursor is invalid" });
+  return json(res, 200, { lists: page.items, next_cursor: page.nextCursor });
+}
+
+function handleListMembers(res: http.ServerResponse, listId: string, searchParams: URLSearchParams): void {
+  const limit = limitParam(searchParams);
+  const network = networkParam(searchParams);
+  if (limit === null) return json(res, 400, { error: "limit must be a positive integer" });
+  if (!network) return json(res, 400, { error: "network must be mainnet or testnet" });
+  const page = queryDripsListMembers({ listId, limit, cursor: searchParams.get("cursor") ?? undefined, network });
+  if (page === "not_found") return json(res, 404, { error: "List not found" });
+  if (!page) return json(res, 400, { error: "cursor is invalid" });
+  return json(res, 200, { members: page.items, next_cursor: page.nextCursor });
+}
+
+function handleStreams(res: http.ServerResponse, searchParams: URLSearchParams): void {
+  const account = searchParams.get("account");
+  const limit = limitParam(searchParams);
+  const network = networkParam(searchParams);
+  if (!account || !STELLAR_ADDRESS.test(account)) return json(res, 400, { error: "account must be a valid Stellar address" });
+  if (limit === null) return json(res, 400, { error: "limit must be a positive integer" });
+  if (!network) return json(res, 400, { error: "network must be mainnet or testnet" });
+  const page = queryDripsStreams({ account, limit, cursor: searchParams.get("cursor") ?? undefined, network });
+  if (!page) return json(res, 400, { error: "cursor is invalid" });
+  return json(res, 200, { streams: page.items, next_cursor: page.nextCursor });
+}
+
+function handleStreamsTvl(res: http.ServerResponse, searchParams: URLSearchParams): void {
+  const token = searchParams.get("token");
+  const network = networkParam(searchParams);
+  if (!token) return json(res, 400, { error: "token query param is required" });
+  if (!network) return json(res, 400, { error: "network must be mainnet or testnet" });
+  const key = cacheKey(`streams:${network}:${token}`, "current", "current", false);
+  const cached = cacheGet<string>(key);
+  const total = cached ?? getDripsStreamingTvl(token, network);
+  if (!cached) cacheSet(key, total, "current");
+  return json(res, 200, { token, total_value_locked: total, cached: !!cached },);
 }
 
 function buildEventQueryParams(
@@ -282,6 +350,7 @@ export function createServer(): http.Server {
     const grantorAnalyticsMatch = url.pathname.match(
       /^\/analytics\/grantors\/([A-Z0-9]{56})\/summary$/
     );
+    const listMembersMatch = url.pathname.match(/^\/lists\/([^/]+)\/members$/);
 
     switch (url.pathname) {
       case "/health":
@@ -296,6 +365,15 @@ export function createServer(): http.Server {
       case "/analytics/tvl":
         return handleAnalyticsTvl(res, url.searchParams);
 
+      case "/analytics/streams/tvl":
+        return handleStreamsTvl(res, url.searchParams);
+
+      case "/lists":
+        return handleLists(res, url.searchParams);
+
+      case "/streams":
+        return handleStreams(res, url.searchParams);
+
       default:
         if (historyMatch) {
           return handleHistory(res, historyMatch[1], url.searchParams);
@@ -305,6 +383,9 @@ export function createServer(): http.Server {
         }
         if (grantorAnalyticsMatch) {
           return handleAnalyticsGrantorSummary(res, grantorAnalyticsMatch[1]);
+        }
+        if (listMembersMatch) {
+          return handleListMembers(res, decodeURIComponent(listMembersMatch[1]), url.searchParams);
         }
         return json(res, 404, {
           error: "Not found",
